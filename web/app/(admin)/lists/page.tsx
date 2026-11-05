@@ -1,5 +1,5 @@
 'use client';
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { useApp } from '@/components/Shell';
 import { Badge, Button, Card, ErrorBox, Field, Table, Td, fmtTime, short, useAsync } from '@/components/ui';
 import { api } from '@/lib/api';
@@ -11,8 +11,16 @@ function Selection() {
   const [err, setErr] = useState<unknown>(null);
   const [add, setAdd] = useState({ source: '', group: '' });
   const [pending, setPending] = useState<'all' | 'selected' | null>(null); // optimistic radio state
-  const run = async (fn: () => Promise<unknown>) => { setErr(null); try { await fn(); } catch (x) { setErr(x); } sel.reload(); };
+  const run = async (fn: () => Promise<unknown>): Promise<boolean> => {
+    setErr(null);
+    let ok = true;
+    try { await fn(); } catch (x) { setErr(x); ok = false; }
+    sel.reload();
+    return ok;
+  };
   const d = sel.data;
+  // optimistic radio state is dropped once the server value has caught up
+  useEffect(() => { if (pending && d?.policy === pending) setPending(null); }, [pending, d?.policy]);
   const groupName = (id: string | null) => (id ? (groups.data?.find((g) => g.id === id)?.name ?? short(id)) : 'whole tenant');
   const nameOf = (id: string) => d?.available.find((a) => a.id === id)?.name ?? id;
 
@@ -26,7 +34,7 @@ function Selection() {
             {(['all', 'selected'] as const).map((p) => (
               <label key={p} className="flex items-center gap-2">
                 <input type="radio" name="policy" checked={(pending ?? d.policy) === p}
-                  onChange={() => { setPending(p); run(() => api.setListPolicy(tenant, p)).finally(() => setPending(null)); }} />
+                  onChange={() => { setPending(p); run(() => api.setListPolicy(tenant, p)).then((ok) => { if (!ok) setPending(null); }); }} />
                 {p === 'all' ? `All platform-enabled lists (${d.available.length})` : 'Only the lists selected below'}
               </label>
             ))}
