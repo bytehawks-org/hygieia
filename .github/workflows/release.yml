@@ -25,21 +25,21 @@ jobs:
   web:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: 22 }
       - run: cd web && npm ci && npm run build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: web-out, path: web/out }
 
   linux:
     needs: web
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { name: web-out, path: web/out }
       - run: cargo build --release -p hygeia-proxy -p hygeia
       - run: packaging/linux/build-deb.sh target/release/hygeia-proxy web/out dist
@@ -51,18 +51,18 @@ jobs:
           cp target/release/hygeia t/hygeia-server/
           tar -C t -czf dist/hygeia-proxy-linux-x86_64.tar.gz hygeia-proxy
           tar -C t -czf dist/hygeia-server-linux-x86_64.tar.gz hygeia-server
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: linux, path: dist/* }
 
   windows:
     needs: web
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: ilammy/setup-nasm@v1
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { name: web-out, path: web/out }
       - run: cargo build --release -p hygeia-proxy
       - run: cargo build --release --manifest-path crates/hygeia-tray/Cargo.toml
@@ -78,7 +78,7 @@ jobs:
         continue-on-error: true  # unproven: the zip must still ship if WiX fails
         shell: pwsh
         run: packaging/windows/build-msi.ps1 -Version $env:TAG
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: |
@@ -88,13 +88,13 @@ jobs:
   extensions:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: wasm32-unknown-unknown }
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with: { tool: 'wasm-bindgen-cli@0.2.130' }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with: { node-version: 22 }
       - run: ./extension/build.sh
       - run: |
@@ -102,14 +102,14 @@ jobs:
             node extension/package.mjs $b
             (cd extension/dist/$b && zip -qr ../../../hygeia-blocker-$b.zip .)
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: extensions, path: hygeia-blocker-*.zip }
 
   publish:
     needs: [ci, linux, windows, extensions]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { path: out, merge-multiple: true }
       - run: ls -lh out && cd out && sha256sum * > SHA256SUMS
       - name: Create or update the release

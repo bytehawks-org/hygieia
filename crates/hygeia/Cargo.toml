@@ -20,8 +20,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 arc-swap.workspace = true
 ed25519-dalek.workspace = true
-getrandom = "0.3"
-toml = "0.9"
+getrandom = "0.4"
+toml = "1.1"
 
 [[bin]]
 name = "hygeia"
