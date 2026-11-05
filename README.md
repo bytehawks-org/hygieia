@@ -52,7 +52,7 @@ sudo systemctl enable --now hygeia-proxy
 sudo hygeia-proxy token        # credential for http://127.0.0.1:8470/login/
 ```
 
-Config: `/etc/hygeia-proxy/hygeia-proxy.toml` (all keys optional; DNS stays off). State: `/var/lib/hygeia-proxy`. The unit runs as a dynamic user with a hardened sandbox. An RPM spec is in `packaging/linux/` (not yet built or tested).
+Config: `/etc/hygeia-proxy/hygeia-proxy.toml` (all keys optional; DNS stays off). State: `/var/lib/hygeia-proxy`. The unit runs as a dynamic user with a hardened sandbox. Windows (untested): unzip the CI artifact and run `install.ps1` from an elevated PowerShell (service `HygeiaProxy`, data in `%ProgramData%\Hygeia`). An RPM spec is in `packaging/linux/` (not yet built or tested).
 
 ## Standalone node
 

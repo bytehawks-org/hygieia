@@ -119,6 +119,15 @@ With DNS off (default) none of this applies and the install touches no network s
 - macOS is out of scope for now.
 - Node DNS (`local` / `cloud forward`) is off by default; enabling it is a deliberate user action, never part of install.
 
+## Packaging (implemented, state of verification)
+
+| | What | Verified |
+|---|---|---|
+| Linux `.deb` | `packaging/linux/build-deb.sh`: binary, UI, hardened systemd unit (DynamicUser, `StateDirectory`, `CAP_NET_BIND_SERVICE` only), conffile `/etc/hygeia-proxy/hygeia-proxy.toml`; installing does not start or enable the service and touches no resolver | built, inspected, `dpkg -i`/`-r` in the dev container (no systemd there: unit not started) |
+| Linux `.rpm` | `packaging/linux/hygeia-proxy.spec` | not built |
+| Windows service | `hygeia-proxy service install/uninstall/run` (`hygeia-winsvc`: SCM glue, LocalService, data in `%ProgramData%\Hygeia` restricted to SYSTEM/Administrators/LocalService via icacls), `packaging/windows/*.ps1`, CI zip | cross-type-checked only; never run |
+| Windows MSI, tray icon, first-run wizard | not done | – |
+
 ## Verification limits
 
 Development and CI here run on Linux. Windows code (service, tray, MSI, resolver changes) can be cross-compiled but **only a Windows runner can test it**: the plan adds a `windows-latest` CI job and a manual install checklist; nothing Windows-specific should be called "tested" before that exists.

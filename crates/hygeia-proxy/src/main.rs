@@ -34,6 +34,9 @@ enum Cmd {
     Info,
     /// Validate the configuration and exit.
     CheckConfig,
+    /// Windows service management (install, uninstall).
+    #[command(subcommand)]
+    Service(hygeia_proxy::service::ServiceCmd),
 }
 
 fn paths(cli: &Cli) -> Result<(Paths, PathBuf), String> {
@@ -70,6 +73,24 @@ async fn main() -> ExitCode {
 async fn real_main(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (p, cfg_path) = paths(&cli)?;
     match cli.command.unwrap_or(Cmd::Run) {
+        Cmd::Service(sub) => {
+            // `install` without --data-dir uses the machine-wide location, not the user profile.
+            #[cfg(windows)]
+            let dir = match (&cli.data_dir, sub) {
+                (None, hygeia_proxy::service::ServiceCmd::Install) => {
+                    hygeia_proxy::service::program_data_dir()
+                }
+                _ => p.dir.clone(),
+            };
+            #[cfg(not(windows))]
+            let dir = p.dir.clone();
+            let cfg = if cli.config.is_none() {
+                dir.join("hygeia-proxy.toml")
+            } else {
+                cfg_path.clone()
+            };
+            hygeia_proxy::service::handle(sub, &dir, &cfg).await?;
+        }
         Cmd::Run => {
             tracing_subscriber::fmt()
                 .with_env_filter(

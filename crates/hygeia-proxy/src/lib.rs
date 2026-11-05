@@ -8,6 +8,7 @@ pub mod config;
 pub mod connected;
 pub mod guard;
 pub mod paths;
+pub mod service;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

@@ -96,6 +96,21 @@ jobs:
       - run: cargo build -p hygeia-proxy
       - run: cargo test -p hygeia-proxy -p hygeia-store --lib
       - run: cargo test -p hygeia-proxy --test node
+      - run: cargo test -p hygeia-proxy --test connected
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: cd web && npm ci && npm run build
+      - run: cargo build --release -p hygeia-proxy
+      - name: Assemble the zip (exe + UI + install scripts)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist/hygeia | Out-Null
+          Copy-Item target/release/hygeia-proxy.exe dist/hygeia/
+          Copy-Item web/out dist/hygeia/web -Recurse
+          Copy-Item packaging/windows/*.ps1 dist/hygeia/
+          Compress-Archive dist/hygeia dist/hygeia-proxy-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with: { name: hygeia-proxy-windows, path: dist/hygeia-proxy-windows-x64.zip }
 
   package-linux:
     runs-on: ubuntu-latest
