@@ -1,0 +1,23 @@
+[package]
+name = "hygeia"
+description = "Hygeia all-in-one binary (zero-config: api + dns)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hygeia-core.workspace = true
+hygeia-api.workspace = true
+hygeia-dns.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+arc-swap.workspace = true
+ed25519-dalek.workspace = true
+getrandom = "0.3"
+toml = "0.9"
+
+[[bin]]
+name = "hygeia"
+path = "src/main.rs"

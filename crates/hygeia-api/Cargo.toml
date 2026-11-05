@@ -1,0 +1,22 @@
+[package]
+name = "hygeia-api"
+description = "Control plane: REST API, enrollment, bundle distribution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hygeia-core.workspace = true
+hygeia-audit.workspace = true
+hygeia-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ed25519-dalek.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+axum = "0.8"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

@@ -1,0 +1,9 @@
+[package]
+name = "hygeia-blocker"
+description = "Browser extension engine bindings (WASM-ready, skeleton)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hygeia-core.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "hygeia-dns"
+description = "DNS data plane (UDP/TCP) enforcing the signed ruleset"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hygeia-core.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+arc-swap.workspace = true
+hickory-proto = "0.26"
