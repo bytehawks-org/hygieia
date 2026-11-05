@@ -30,6 +30,7 @@ base64 = "0.22"
 tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
+jsonschema = { version = "0.60", default-features = false }
 rcgen = "0.14"
 http-body-util = "0.1"
 ed25519-dalek.workspace = true

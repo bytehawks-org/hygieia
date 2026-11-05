@@ -60,6 +60,14 @@ stop; start
 ceq "signing key is stable (browsers pin it)" "$("$BIN" --data-dir "$D" pubkey)" "$PUB"
 ceq "enrolled device still authenticates" "$(code -H "authorization: Bearer $SEC" $B/v1/bundle)" 200
 ceq "audit chain still verifies" "$(curl -s "${A[@]}" $B/v1/admin/audit/verify | jget ok)" True
+say; say "Generated TypeScript client + OpenAPI document"
+ceq "/v1/openapi.json is OpenAPI 3.1" "$(curl -s $B/v1/openapi.json | jget openapi)" 3.1.0
+if command -v node >/dev/null && [ -d web/node_modules/openapi-fetch ]; then
+  check "generated client drives the live node" node --experimental-strip-types --no-warnings web/test/client-live.ts "$B" "$OWNER"
+else
+  say "  SKIP  generated client (needs node and web/node_modules)"
+fi
+
 say; say "Setup wizard (hygeia-proxy setup)"
 W="$D/wiz.toml"
 check "non-interactive setup writes a valid config" "$BIN" --config "$W" setup --non-interactive --mode standalone --dns true --dns-upstream 1.1.1.1:53

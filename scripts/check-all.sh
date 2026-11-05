@@ -40,7 +40,7 @@ else skip wasm-core "wasm32 target missing"; fi
 echo "== JavaScript =="
 if command -v node >/dev/null; then
   run extension-unit node --test extension/test/scriptlets.test.mjs extension/test/background.test.mjs
-  [ -d web/node_modules ] && { run web-typecheck bash -c 'cd web && npx tsc --noEmit'; run web-unit node --test web/test/oidc.test.mjs; } \
+  [ -d web/node_modules ] && { run web-typecheck bash -c 'cd web && npx tsc --noEmit'; run web-unit node --test web/test/oidc.test.mjs; run api-contract scripts/gen-api.sh --check; } \
     || skip web-typecheck "web/node_modules missing (cd web && npm ci)"
 else skip extension-unit "node not installed"; fi
 

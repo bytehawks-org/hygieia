@@ -56,6 +56,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
         // data plane (device credentials)
+        .route("/v1/openapi.json", get(openapi_doc))
         .route("/v1/pubkey", get(pubkey))
         .route("/v1/enroll", post(enroll))
         .route("/v1/bundle", get(bundle))
@@ -305,6 +306,11 @@ async fn readyz(State(st): S) -> Response {
             (StatusCode::SERVICE_UNAVAILABLE, "store unavailable").into_response()
         }
     }
+}
+
+/// The API description (public: it documents routes, it exposes no data).
+async fn openapi_doc() -> Response {
+    Json(crate::openapi::spec()).into_response()
 }
 
 async fn pubkey(State(st): S) -> String {
@@ -3369,5 +3375,404 @@ mod tests {
                 && a.contains("dns-network.delete")
                 && a.contains("dns-network.link")
         );
+    }
+
+    // ------------------------------------------------------------ OpenAPI contract
+
+    /// Real responses must satisfy the schemas of docs/reference/openapi.json (the source of the
+    /// generated TypeScript types), and error statuses must be the documented ones.
+    #[tokio::test]
+    async fn responses_match_the_openapi_schemas() {
+        let doc = crate::openapi::spec();
+        let check = |schema: &str, v: &serde_json::Value| {
+            let mut root = json!({"$ref": format!("#/components/schemas/{schema}")});
+            root["components"] = doc["components"].clone();
+            let validator = jsonschema::validator_for(&root).expect("schema compiles");
+            let errs: Vec<String> = validator.iter_errors(v).map(|e| e.to_string()).collect();
+            assert!(
+                errs.is_empty(),
+                "{schema} does not match: {errs:?}\nvalue: {v}"
+            );
+        };
+        let documented = |path: &str, method: &str, code: StatusCode| {
+            let m = method.to_lowercase();
+            assert!(
+                doc["paths"][path][&m]["responses"][code.as_u16().to_string()].is_object(),
+                "{method} {path} answered {code}, which the spec does not document"
+            );
+        };
+
+        // the validator must actually reject a response of the wrong shape
+        let bad = std::panic::catch_unwind(|| {
+            let mut root = json!({"$ref": "#/components/schemas/Tenant"});
+            root["components"] = crate::openapi::spec()["components"].clone();
+            jsonschema::validator_for(&root)
+                .unwrap()
+                .is_valid(&json!({"id": 1, "slug": "x"}))
+        });
+        assert_eq!(bad.ok(), Some(false), "validator accepted a wrong Tenant");
+
+        let upstream = fake_upstream().await;
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        store.bootstrap_default().await.unwrap();
+        let mut state = AppState::new(
+            store.clone(),
+            SigningKey::from_bytes(&[1u8; 32]),
+            AuthConfig {
+                break_glass: Some(BreakGlass::new(ADMIN, None).unwrap()),
+                ..Default::default()
+            },
+        );
+        state.dns = Some(Arc::new(crate::doh::DnsService::new(
+            crate::doh::DnsServiceConfig::new(upstream),
+        )));
+        let app = router(Arc::new(state));
+        // (schema, is_list) of the body for every call; the status must be documented too.
+        let go = |method: &'static str,
+                  uri: String,
+                  body: Option<serde_json::Value>,
+                  path: &'static str,
+                  expect: StatusCode,
+                  schema: Option<(&'static str, bool)>| {
+            let app = app.clone();
+            let check = &check;
+            let documented = &documented;
+            async move {
+                let (st, _, b) = call(&app, method, &uri, Some(ADMIN), body).await;
+                assert_eq!(st, expect, "{method} {uri}");
+                documented(path, method, st);
+                let v = if b.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    j(&b)
+                };
+                if let Some((name, list)) = schema {
+                    if list {
+                        let items = v.as_array().unwrap_or_else(|| panic!("{uri}: not a list"));
+                        items.iter().for_each(|x| check(name, x));
+                    } else {
+                        check(name, &v);
+                    }
+                }
+                v
+            }
+        };
+        let ok = StatusCode::OK;
+        let created = StatusCode::CREATED;
+        let none = StatusCode::NO_CONTENT;
+
+        // identity
+        let (_, _, b) = call(&app, "GET", "/v1/config", None, None).await;
+        check("PublicConfig", &j(&b));
+        let me = go(
+            "GET",
+            "/v1/me".into(),
+            None,
+            "/v1/me",
+            ok,
+            Some(("Principal", false)),
+        )
+        .await;
+        assert_eq!(me["kind"], "break_glass");
+        go(
+            "GET",
+            "/v1/admin/tenants".into(),
+            None,
+            "/v1/admin/tenants",
+            ok,
+            Some(("Tenant", true)),
+        )
+        .await;
+        go(
+            "POST",
+            "/v1/admin/tenants".into(),
+            Some(json!({"slug": "acme", "name": "Acme"})),
+            "/v1/admin/tenants",
+            created,
+            Some(("Tenant", false)),
+        )
+        .await;
+        go(
+            "POST",
+            "/v1/admin/groups".into(),
+            Some(json!({"name": "kids"})),
+            "/v1/admin/groups",
+            created,
+            Some(("Group", false)),
+        )
+        .await;
+        go(
+            "GET",
+            "/v1/admin/groups".into(),
+            None,
+            "/v1/admin/groups",
+            ok,
+            Some(("Group", true)),
+        )
+        .await;
+        go(
+            "GET",
+            "/v1/admin/users".into(),
+            None,
+            "/v1/admin/users",
+            ok,
+            Some(("User", true)),
+        )
+        .await;
+        go(
+            "GET",
+            "/v1/admin/bindings".into(),
+            None,
+            "/v1/admin/bindings",
+            ok,
+            Some(("Binding", true)),
+        )
+        .await;
+
+        // rules and simulation
+        let rule = go(
+            "POST",
+            "/v1/admin/rules".into(),
+            Some(json!({"action": "block", "pattern": "ads.example.com", "comment": "x"})),
+            "/v1/admin/rules",
+            created,
+            Some(("Rule", false)),
+        )
+        .await;
+        go(
+            "GET",
+            "/v1/admin/rules".into(),
+            None,
+            "/v1/admin/rules",
+            ok,
+            Some(("Rule", true)),
+        )
+        .await;
+        let sim = go("POST", "/v1/admin/simulate".into(),
+            Some(json!({"host": "ads.example.com", "extra_rules": [{"action": "allow", "pattern": "ads.example.com"}]})),
+            "/v1/admin/simulate", ok, Some(("Simulation", false))).await;
+        assert_eq!(sim["current"]["action"], "Block");
+        let rid = rule["id"].as_str().unwrap();
+        go(
+            "DELETE",
+            format!("/v1/admin/rules/{rid}"),
+            None,
+            "/v1/admin/rules/{id}",
+            none,
+            None,
+        )
+        .await;
+
+        // devices and tokens
+        let et = go(
+            "POST",
+            "/v1/admin/enrollment-tokens".into(),
+            Some(json!({})),
+            "/v1/admin/enrollment-tokens",
+            ok,
+            Some(("CreatedEnrollmentToken", false)),
+        )
+        .await;
+        let (st, _, b) = call(
+            &app,
+            "POST",
+            "/v1/enroll",
+            None,
+            Some(json!({"token": et["token"], "device_info": "laptop"})),
+        )
+        .await;
+        assert_eq!(st, ok);
+        check("EnrollResponse", &j(&b));
+        go(
+            "GET",
+            "/v1/admin/devices".into(),
+            None,
+            "/v1/admin/devices",
+            ok,
+            Some(("Device", true)),
+        )
+        .await;
+        let at = go(
+            "POST",
+            "/v1/admin/api-tokens".into(),
+            Some(json!({"name": "ci", "role": "viewer"})),
+            "/v1/admin/api-tokens",
+            created,
+            Some(("CreatedApiToken", false)),
+        )
+        .await;
+        go(
+            "GET",
+            "/v1/admin/api-tokens".into(),
+            None,
+            "/v1/admin/api-tokens",
+            ok,
+            Some(("ApiToken", true)),
+        )
+        .await;
+        let id = at["id"].as_str().unwrap();
+        go(
+            "DELETE",
+            format!("/v1/admin/api-tokens/{id}"),
+            None,
+            "/v1/admin/api-tokens/{id}",
+            none,
+            None,
+        )
+        .await;
+
+        // lists
+        go(
+            "GET",
+            "/v1/admin/lists".into(),
+            None,
+            "/v1/admin/lists",
+            ok,
+            Some(("ListStatus", true)),
+        )
+        .await;
+        go(
+            "GET",
+            "/v1/admin/list-subscriptions".into(),
+            None,
+            "/v1/admin/list-subscriptions",
+            ok,
+            Some(("ListSelection", false)),
+        )
+        .await;
+        go(
+            "PUT",
+            "/v1/admin/list-policy".into(),
+            Some(json!({"policy": "selected"})),
+            "/v1/admin/list-policy",
+            none,
+            None,
+        )
+        .await;
+
+        // cloud DNS administration
+        let dt = go(
+            "POST",
+            "/v1/admin/dns-tokens".into(),
+            Some(json!({"name": "home", "dot": true})),
+            "/v1/admin/dns-tokens",
+            created,
+            Some(("CreatedDnsToken", false)),
+        )
+        .await;
+        go(
+            "GET",
+            "/v1/admin/dns-tokens".into(),
+            None,
+            "/v1/admin/dns-tokens",
+            ok,
+            Some(("DnsToken", true)),
+        )
+        .await;
+        go(
+            "GET",
+            "/v1/admin/dns/settings".into(),
+            None,
+            "/v1/admin/dns/settings",
+            ok,
+            Some(("DnsSettings", false)),
+        )
+        .await;
+        go("PUT", "/v1/admin/dns/settings".into(),
+            Some(json!({"log_enabled": true, "retention_days": 7, "fail_open": true, "block_mode": "null_ip"})),
+            "/v1/admin/dns/settings", ok, Some(("DnsSettings", false))).await;
+        go(
+            "GET",
+            "/v1/admin/dns/query-log".into(),
+            None,
+            "/v1/admin/dns/query-log",
+            ok,
+            Some(("QueryLogEntry", true)),
+        )
+        .await;
+        go(
+            "GET",
+            "/v1/admin/dns/stats".into(),
+            None,
+            "/v1/admin/dns/stats",
+            ok,
+            Some(("DnsStats", false)),
+        )
+        .await;
+        let net = go(
+            "POST",
+            "/v1/admin/dns/networks".into(),
+            Some(json!({"name": "office", "cidr": "192.168.50.0/24"})),
+            "/v1/admin/dns/networks",
+            created,
+            Some(("DnsNetwork", false)),
+        )
+        .await;
+        go(
+            "GET",
+            "/v1/admin/dns/networks".into(),
+            None,
+            "/v1/admin/dns/networks",
+            ok,
+            Some(("DnsNetwork", true)),
+        )
+        .await;
+        let nid = net["id"].as_str().unwrap();
+        go(
+            "DELETE",
+            format!("/v1/admin/dns/networks/{nid}"),
+            None,
+            "/v1/admin/dns/networks/{id}",
+            none,
+            None,
+        )
+        .await;
+        let tid = dt["id"].as_str().unwrap();
+        go(
+            "DELETE",
+            format!("/v1/admin/dns-tokens/{tid}"),
+            None,
+            "/v1/admin/dns-tokens/{id}",
+            none,
+            None,
+        )
+        .await;
+        go(
+            "DELETE",
+            "/v1/admin/dns/query-log".into(),
+            None,
+            "/v1/admin/dns/query-log",
+            ok,
+            Some(("Deleted", false)),
+        )
+        .await;
+
+        // audit
+        go(
+            "GET",
+            "/v1/admin/audit".into(),
+            None,
+            "/v1/admin/audit",
+            ok,
+            Some(("AuditEvent", true)),
+        )
+        .await;
+        go(
+            "GET",
+            "/v1/admin/audit/verify".into(),
+            None,
+            "/v1/admin/audit/verify",
+            ok,
+            Some(("AuditVerify", false)),
+        )
+        .await;
+
+        // documented error statuses
+        let (st, _, _) = call(&app, "GET", "/v1/admin/rules", None, None).await;
+        documented("/v1/admin/rules", "GET", st);
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, _, b) = call(&app, "GET", "/v1/openapi.json", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(j(&b)["openapi"], "3.1.0");
     }
 }

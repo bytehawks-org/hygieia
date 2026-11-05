@@ -1,53 +1,30 @@
-// Hand-maintained mirror of the API's JSON (an OpenAPI-generated client replaces this once utoipa lands).
-export type Role = 'owner' | 'admin' | 'editor' | 'viewer' | 'auditor';
+// Types of the API's JSON, derived from the generated OpenAPI schema (lib/api-schema.d.ts, produced
+// by scripts/gen-api.sh from docs/reference/openapi.json). Do not hand-edit shapes here: change the
+// API description in crates/hygeia-api/src/openapi.rs and regenerate; `tsc` then shows what breaks.
+import type { components } from './api-schema';
 
-export interface Binding { id: string; user_id: string; tenant_id: string | null; role: Role }
+type S = components['schemas'];
 
-export type Principal =
-  | { kind: 'local_owner' }
-  | { kind: 'break_glass' }
-  | { kind: 'api_token'; id: string; tenant_id: string; role: Role }
-  | { kind: 'user'; id: string; issuer: string; subject: string; email: string | null; bindings: Binding[] };
-
-export interface PublicConfig {
-  /** 'server' (central) or 'standalone' (single-machine node) */
-  mode: 'server' | 'standalone' | string;
-  environment: 'production' | 'staging' | 'dev' | string;
-  break_glass: boolean;
-  oidc: { issuer: string; client_id: string; scope: string } | null;
-}
-
-export interface Tenant { id: string; slug: string; name: string }
-export interface Group { id: string; tenant_id: string; name: string }
-export interface User { id: string; issuer: string; subject: string; email: string | null; disabled: boolean }
-export interface Rule { id: string; tenant_id: string; group_id: string | null; action: 'allow' | 'block'; pattern: string; comment: string }
-export interface Device { id: string; tenant_id: string; group_id: string; info: string; last_seen: number; revoked: boolean }
-export interface ApiToken { id: string; tenant_id: string; name: string; role: Role; expires_at: number | null; revoked: boolean }
-
-export interface AuditEvent {
-  seq: number; ts: number; tenant_id: string; actor: string; action: string; target: string;
-  diff: unknown; prev_hash: string; hash: string;
-}
-
-export interface ListStatus {
-  id: string; name: string; url: string; license: string; attribution: string;
-  last_ok: number | null; last_error: string | null;
-  block_domains: number; allow_domains: number; generic_selectors: number;
-  host_rule_sets: number; scriptlet_calls: number; skipped_lines: number;
-  dropped_trusted_scriptlets: number; sha256: string | null;
-}
-
-export type Reason =
-  | { CustomAllow: { rule: string } } | { CustomBlock: { rule: string } }
-  | { ListAllow: { list: string; rule: string } } | { ListBlock: { list: string; rule: string } }
-  | 'Default';
-export interface Verdict { action: 'Allow' | 'Block'; reason: Reason }
-export interface Simulation { current: Verdict; with_changes: Verdict }
-
-export type ListPolicy = 'all' | 'selected';
-export interface Subscription { group_id: string | null; source_id: string }
-export interface ListSelection {
-  policy: ListPolicy;
-  subscriptions: Subscription[];
-  available: { id: string; name: string; license: string }[];
-}
+export type Role = S['Role'];
+export type Binding = S['Binding'];
+export type Principal = S['Principal'];
+export type PublicConfig = S['PublicConfig'];
+export type Tenant = S['Tenant'];
+export type Group = S['Group'];
+export type User = S['User'];
+export type Rule = S['Rule'];
+export type Device = S['Device'];
+export type ApiToken = S['ApiToken'];
+export type AuditEvent = S['AuditEvent'];
+export type ListStatus = S['ListStatus'];
+export type Reason = S['Reason'];
+export type Verdict = S['Verdict'];
+export type Simulation = S['Simulation'];
+export type ListPolicy = S['ListPolicy'];
+export type ListSelection = S['ListSelection'];
+export type Subscription = ListSelection['subscriptions'][number];
+export type DnsToken = S['DnsToken'];
+export type DnsNetwork = S['DnsNetwork'];
+export type DnsSettings = S['DnsSettings'];
+export type QueryLogEntry = S['QueryLogEntry'];
+export type DnsStats = S['DnsStats'];

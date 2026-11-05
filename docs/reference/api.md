@@ -85,6 +85,18 @@ All require a credential with the stated permission. Every mutating call is writ
 
 `401` unauthenticated or invalid credential · `403` authenticated but not permitted (or cross-origin on a node) · `404` unknown object (also DoH with an invalid token) · `409` conflict / broken audit chain · `421` unexpected `Host` (node) · `429` rate limited (DoH, link) · `502` upstream unreachable and nothing cached (connected node) · `503` store unavailable (`/readyz`).
 
-## Not available yet
+## OpenAPI and the generated TypeScript client
 
-An OpenAPI description and a generated TypeScript client are on the [roadmap](../ROADMAP.md) (item 6); the UI currently uses hand-written types.
+The machine-readable contract is [`openapi.json`](openapi.json) (OpenAPI 3.1, every route, parameter, body and response). A running server or node also serves it at `GET /v1/openapi.json` (no credential needed; it describes routes, it exposes no data).
+
+- **Source:** `crates/hygeia-api/src/openapi.rs`, hand-curated because the handlers return untyped responses.
+- **Drift is a test failure:** every route registered in the router must be documented (and the reverse); real responses of the main endpoints are validated against the schemas; `openapi.json` must equal what the code produces.
+- **TypeScript:** `web/lib/api-schema.d.ts` is generated from it (`openapi-typescript`); the UI's `web/lib/types.ts` derives its types from that file, so an API change that breaks the UI fails `tsc`. `web/lib/client.ts` is a typed client (`openapi-fetch`) for scripts and integrations:
+
+```ts
+import { apiClient } from './lib/client';
+const c = apiClient('https://hygeia.example.com', 'hyg_api_…');
+const { data } = await c.GET('/v1/admin/rules', { params: { query: { tenant_id: 't1' } } });
+```
+
+Regenerate after changing the API: `scripts/gen-api.sh` (and `scripts/gen-api.sh --check` to verify). Other languages: feed `openapi.json` to any OpenAPI 3.1 generator.

@@ -110,13 +110,14 @@ Releases are cut by tagging `vX.Y.Z` (workflow `release`, draft release with `SH
 | Control plane: enrolment, bundles, rules, simulate, devices, groups, tenants, users/roles, API tokens, audit | done |
 | Authentication: OIDC resource server, API tokens, break-glass (staging), local owner (node) | done |
 | Storage: PostgreSQL with RLS (production), file store (node), in-memory (tests), one conformance suite | done |
-| Admin UI (Next.js 16 + Tailwind 4, strict CSP, OIDC PKCE) | done; no OIDC refresh, no OpenAPI client |
+| Admin UI (Next.js 16 + Tailwind 4, strict CSP, OIDC PKCE) | done; no OIDC refresh |
 | Standalone node: file state, host/origin guard, opt-in local DNS, CLI | done on Linux |
 | Connected node: relay, pinned key, rollback guard, disk cache, offline serving | done; no local DNS or telemetry in connected mode |
 | Central redundancy: shared compiled bundles, coordinated list refresh, `/readyz`, graceful drain | done; tested with in-process replicas |
 | Cloud DNS: DoH, DoT, DoQ, plain UDP/TCP for registered networks; upstream failover over UDP/DoT/DoH; per-token, per-source and failed-auth limits; per-tenant policy; opt-in pseudonymised query log with retention; Prometheus metrics; native HTTPS with certificate hot-reload | implemented, tested in-process and by smoke scenarios; **not load-tested, no DNSSEC validation, no HTTP/3** |
 | Packaging: `.deb`, systemd, Windows service/tray | see *Install* |
-| OpenAPI + generated client, node-side cloud forwarding | planned: [Roadmap](docs/ROADMAP.md) |
+| OpenAPI 3.1 + generated TypeScript types/client | done: [API](docs/reference/api.md#openapi-and-the-generated-typescript-client) |
+| Node-side cloud forwarding | planned: [Roadmap](docs/ROADMAP.md) |
 
 ## Documentation
 

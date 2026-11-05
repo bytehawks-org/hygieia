@@ -8,6 +8,7 @@ rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.130 --locked     # extension only
 (cd web && npm ci)                                            # UI + its tests
 scripts/check-all.sh                                          # fast confidence check
+scripts/gen-api.sh                                            # after changing the API: OpenAPI + TypeScript types
 ```
 
 Rust edition 2024, resolver 3, MSRV 1.85 (CI uses stable). `hygeia-tray` is a separate workspace (`cargo build --manifest-path crates/hygeia-tray/Cargo.toml`; on Linux it needs GTK/AppIndicator development packages).
