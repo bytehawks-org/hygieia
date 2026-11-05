@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use hygeia_core::{Ruleset, SignedBundle};
-use hygeia_dns::{BlockMode, Decision, decide, forward_udp, question, servfail};
+use hygeia_dns::{BlockMode, Decision, UpstreamPool, decide, question, servfail};
 use hygeia_store::{DnsSettings, DnsToken, QueryLogEntry, hash_secret};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
@@ -31,13 +31,13 @@ pub const MAX_QUERY: usize = 4096;
 
 #[derive(Debug, Clone)]
 pub struct DnsServiceConfig {
-    pub upstream: SocketAddr,
+    /// Upstream resolvers with failover (UDP, DoT, DoH).
+    pub pool: Arc<UpstreamPool>,
     pub block_mode: BlockMode,
     pub rate_per_sec: f64,
     pub burst: f64,
     /// No usable bundle for the tenant: answer anyway (open) instead of SERVFAIL (closed, default).
     pub fail_open: bool,
-    pub upstream_timeout: Duration,
     /// Master secret for client pseudonyms (`HYGEIA_LOG_KEY`). Random per process if not set, which
     /// makes pseudonyms unlinkable across restarts (set it for stable daily pseudonyms).
     pub log_key: [u8; 32],
@@ -50,14 +50,20 @@ pub struct DnsServiceConfig {
 }
 
 impl DnsServiceConfig {
+    /// Single plain-UDP upstream (tests, quick setups).
     pub fn new(upstream: SocketAddr) -> Self {
+        let pool = UpstreamPool::new(&[upstream.to_string()], Duration::from_secs(3))
+            .expect("a socket address is a valid upstream");
+        Self::with_pool(Arc::new(pool))
+    }
+
+    pub fn with_pool(pool: Arc<UpstreamPool>) -> Self {
         Self {
-            upstream,
+            pool,
             block_mode: BlockMode::NxDomain,
             rate_per_sec: 50.0,
             burst: 100.0,
             fail_open: false,
-            upstream_timeout: Duration::from_secs(3),
             ip_rate_per_sec: 100.0,
             ip_burst: 200.0,
             ip_fail_rate: 0.5,
@@ -431,7 +437,7 @@ impl DnsService {
             None => self.cfg.block_mode,
         };
         let forward = async {
-            match forward_udp(packet, self.cfg.upstream, self.cfg.upstream_timeout).await {
+            match self.cfg.pool.forward(packet).await {
                 Ok(b) => {
                     self.counters.forwarded.fetch_add(1, Ordering::Relaxed);
                     (b, "allowed")

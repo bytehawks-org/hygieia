@@ -4,6 +4,9 @@
 //! Not yet implemented: TCP, DoT/DoH/DoQ listeners, DoT upstream, per-client
 //! tenant resolution, query-log sink. See the project roadmap in README.
 
+pub mod upstream;
+pub use upstream::{UpstreamError, UpstreamPool};
+
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;

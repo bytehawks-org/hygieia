@@ -78,11 +78,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Result<_, String>>()?;
     if cfg.cloud_dns.enabled {
         let c = &cfg.cloud_dns;
-        let mut d = hygeia_api::doh::DnsServiceConfig::new(
-            c.upstream
-                .parse()
-                .map_err(|e| format!("cloud_dns.upstream {:?}: {e}", c.upstream))?,
-        );
+        let specs: Vec<String> = if !c.upstreams.is_empty() {
+            c.upstreams.clone()
+        } else if !c.upstream.is_empty() {
+            vec![c.upstream.clone()]
+        } else {
+            vec!["udp://9.9.9.9:53".into()]
+        };
+        let pool = hygeia_dns::UpstreamPool::new(&specs, Duration::from_secs(3))
+            .map_err(|e| format!("cloud_dns.upstreams: {e}"))?;
+        let mut d = hygeia_api::doh::DnsServiceConfig::with_pool(Arc::new(pool));
         d.block_mode = match c.block_mode.as_str() {
             "null_ip" => hygeia_dns::BlockMode::NullIp,
             _ => hygeia_dns::BlockMode::NxDomain,

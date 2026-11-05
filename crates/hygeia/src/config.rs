@@ -132,7 +132,10 @@ impl Default for DnsSection {
 #[serde(default, deny_unknown_fields)]
 pub struct CloudDnsSection {
     pub enabled: bool,
-    /// Plain-UDP recursive resolver (`ip:port`) for allowed queries. DoT/DoH upstream: not yet.
+    /// Recursive resolvers for allowed queries, tried in order with failover. Forms:
+    /// `udp://9.9.9.9:53`, `tls://9.9.9.9:853#dns.quad9.net`, `https://dns.quad9.net/dns-query`.
+    pub upstreams: Vec<String>,
+    /// Single plain-UDP upstream (`ip:port`); kept for compatibility, used only if `upstreams` is empty.
     pub upstream: String,
     /// `nxdomain` | `null_ip`
     pub block_mode: String,
@@ -149,7 +152,8 @@ impl Default for CloudDnsSection {
     fn default() -> Self {
         Self {
             enabled: false,
-            upstream: "9.9.9.9:53".into(),
+            upstreams: Vec::new(),
+            upstream: String::new(),
             block_mode: "nxdomain".into(),
             rate_per_sec: 50.0,
             burst: 100.0,
