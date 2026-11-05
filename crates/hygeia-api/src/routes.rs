@@ -88,6 +88,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/admin/dns/stats", get(dns_stats))
         .route(
+            "/v1/admin/dns/networks",
+            get(list_dns_networks).post(add_dns_network),
+        )
+        .route("/v1/admin/dns/networks/{id}", delete(delete_dns_network))
+        .route("/v1/dns/link/{token}", axum::routing::put(link_dns_network))
+        .route(
             "/dns-query/{token}",
             get(doh_get)
                 .post(doh_post)
@@ -964,6 +970,145 @@ async fn dns_stats(State(st): S, h: HeaderMap, Query(q): Query<LogQ>) -> Respons
         "top_blocked": top(top_b), "top_clients": top(top_c), "by_transport": top(by_t),
     }))
     .into_response()
+}
+
+#[derive(Deserialize)]
+struct NewNetwork {
+    tenant_id: Option<String>,
+    #[serde(default = "d_group")]
+    group_id: String,
+    name: String,
+    cidr: String,
+}
+
+async fn list_dns_networks(State(st): S, h: HeaderMap, Query(q): Query<TenantQ>) -> Response {
+    let (_, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::ApiTokensManage,
+            q.tenant_id,
+            "dns-network.list"
+        )
+        .await
+    );
+    Json(ok_or!(st.store.list_dns_networks(&tenant).await)).into_response()
+}
+
+async fn add_dns_network(State(st): S, h: HeaderMap, Json(r): Json<NewNetwork>) -> Response {
+    let (p, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::ApiTokensManage,
+            r.tenant_id,
+            "dns-network.add"
+        )
+        .await
+    );
+    let Ok(c) = r.cidr.parse::<hygeia_core::cidr::Cidr>() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "invalid network, expected ADDRESS/PREFIX",
+        )
+            .into_response();
+    };
+    if let Err(e) = c.registrable() {
+        return (StatusCode::BAD_REQUEST, e).into_response();
+    }
+    let n = ok_or!(
+        st.store
+            .add_dns_network(&tenant, &r.group_id, &r.name, &r.cidr)
+            .await
+    );
+    if let Some(svc) = &st.dns {
+        svc.refresh_networks(st.store.as_ref()).await;
+    }
+    st.record(
+        &tenant,
+        &p.actor(),
+        "dns-network.add",
+        &n.id,
+        Some(json!({"after": n})),
+    )
+    .await;
+    (StatusCode::CREATED, Json(n)).into_response()
+}
+
+async fn delete_dns_network(
+    State(st): S,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<TenantQ>,
+) -> Response {
+    let (p, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::ApiTokensManage,
+            q.tenant_id,
+            "dns-network.delete"
+        )
+        .await
+    );
+    ok_or!(st.store.delete_dns_network(&tenant, &id).await);
+    if let Some(svc) = &st.dns {
+        svc.refresh_networks(st.store.as_ref()).await;
+    }
+    st.record(&tenant, &p.actor(), "dns-network.delete", &id, None)
+        .await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// "Link my current IP": a DNS token registers the caller's address as its client network
+/// (replacing the previous one it registered), for clients on dynamic addresses.
+async fn link_dns_network(
+    State(st): S,
+    ClientIp(ip): ClientIp,
+    Path(token): Path<String>,
+) -> Response {
+    let (Some(svc), Some(ip)) = (st.dns.clone(), ip) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let tok = match svc.authenticate(&st, &token, Some(ip)).await {
+        Ok(t) => t,
+        Err(crate::doh::DohError::RateLimited) => {
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let prefix = if ip.is_ipv4() { 32 } else { 64 };
+    let Ok(c) = hygeia_core::cidr::Cidr::new(ip, prefix) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if c.registrable().is_err() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let name = format!("dyn:{}", tok.id);
+    if let Ok(existing) = st.store.list_dns_networks(&tok.tenant_id).await {
+        for n in existing.into_iter().filter(|n| n.name == name) {
+            let _ = st.store.delete_dns_network(&tok.tenant_id, &n.id).await;
+        }
+    }
+    let n = match st
+        .store
+        .add_dns_network(&tok.tenant_id, &tok.group_id, &name, &c.to_string())
+        .await
+    {
+        Ok(n) => n,
+        Err(StoreError::Conflict) => return StatusCode::CONFLICT.into_response(),
+        Err(e) => return store_err(e),
+    };
+    svc.refresh_networks(st.store.as_ref()).await;
+    st.record(
+        &tok.tenant_id,
+        &format!("dns-token:{}", tok.id),
+        "dns-network.link",
+        &n.id,
+        Some(json!({"cidr": n.cidr})),
+    )
+    .await;
+    Json(json!({"cidr": n.cidr})).into_response()
 }
 
 // ---------------------------------------------------------------- devices, enrollment
@@ -2999,6 +3144,231 @@ mod tests {
             doh_from(&app, &tok, &q, "[2001:db8:1:3::1]:1", None).await,
             StatusCode::OK,
             "another /64 has its own budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_networks_dot_labels_and_ip_linking() {
+        use crate::doh::DohError;
+        let upstream = fake_upstream().await;
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        store.bootstrap_default().await.unwrap();
+        let mut state = AppState::new(
+            store.clone(),
+            SigningKey::from_bytes(&[1u8; 32]),
+            AuthConfig {
+                break_glass: Some(BreakGlass::new(ADMIN, None).unwrap()),
+                ..Default::default()
+            },
+        );
+        state.dns = Some(Arc::new(crate::doh::DnsService::new(
+            crate::doh::DnsServiceConfig::new(upstream),
+        )));
+        let st = Arc::new(state);
+        let app = router(st.clone());
+        let svc = st.dns.clone().unwrap();
+        call(
+            &app,
+            "POST",
+            "/v1/admin/rules",
+            Some(ADMIN),
+            Some(json!({"action": "block", "pattern": "ads.example.com"})),
+        )
+        .await;
+        let blocked = dns_query("ads.example.com");
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        let rcode = |r: Result<Vec<u8>, DohError>| r.map(|b| b[3] & 0x0f);
+
+        // never an open resolver: nothing registered -> refused
+        assert_eq!(
+            svc.resolve_from_network(&st, ip("192.168.50.7"), "udp", &blocked)
+                .await,
+            Err(DohError::NotFound)
+        );
+
+        // registration rules
+        let post = |body: serde_json::Value| {
+            call(
+                &app,
+                "POST",
+                "/v1/admin/dns/networks",
+                Some(ADMIN),
+                Some(body),
+            )
+        };
+        assert_eq!(
+            post(json!({"name": "all", "cidr": "0.0.0.0/0"})).await.0,
+            StatusCode::BAD_REQUEST,
+            "open-resolver footgun"
+        );
+        assert_eq!(
+            post(json!({"name": "pub", "cidr": "8.0.0.0/8"})).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post(json!({"name": "x", "cidr": "nonsense"})).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        let (c, _, b) = post(json!({"name": "office", "cidr": "192.168.50.0/24"})).await;
+        assert_eq!(c, StatusCode::CREATED);
+        let net_id = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            post(json!({"name": "dup", "cidr": "192.168.50.0/24"}))
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
+
+        // registered source: filtered by the tenant's bundle; the neighbour network is still refused
+        assert_eq!(
+            rcode(
+                svc.resolve_from_network(&st, ip("192.168.50.7"), "udp", &blocked)
+                    .await
+            ),
+            Ok(3)
+        );
+        assert_eq!(
+            rcode(
+                svc.resolve_from_network(&st, ip("192.168.50.7"), "tcp", &dns_query("example.org"))
+                    .await
+            ),
+            Ok(0)
+        );
+        assert_eq!(
+            svc.resolve_from_network(&st, ip("192.168.51.7"), "udp", &blocked)
+                .await,
+            Err(DohError::NotFound)
+        );
+
+        // DoT label: an identifier from a token created with `dot: true`; falls back to the source network
+        let (_, _, b) = call(
+            &app,
+            "POST",
+            "/v1/admin/dns-tokens",
+            Some(ADMIN),
+            Some(json!({"name": "d", "dot": true})),
+        )
+        .await;
+        let label = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["dot_label"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            rcode(
+                svc.resolve_from_label(&st, Some(&label), ip("203.0.113.9"), "dot", &blocked)
+                    .await
+            ),
+            Ok(3),
+            "label attributes an unregistered client"
+        );
+        assert_eq!(
+            svc.resolve_from_label(&st, Some("bogus"), ip("203.0.113.9"), "dot", &blocked)
+                .await,
+            Err(DohError::NotFound)
+        );
+        assert_eq!(
+            rcode(
+                svc.resolve_from_label(&st, Some("bogus"), ip("192.168.50.9"), "dot", &blocked)
+                    .await
+            ),
+            Ok(3),
+            "unknown label, registered source"
+        );
+        let (_, _, nb) = call(
+            &app,
+            "POST",
+            "/v1/admin/dns-tokens",
+            Some(ADMIN),
+            Some(json!({"name": "nodot"})),
+        )
+        .await;
+        let nodot = serde_json::from_slice::<serde_json::Value>(&nb).unwrap();
+        assert!(nodot["dot_label"].is_null(), "no label unless asked");
+
+        // link my current IP: a token registers the caller's address (/32), replacing its previous one
+        let secret = nodot["token"].as_str().unwrap().to_string();
+        let link = |peer: &str| {
+            let app = app.clone();
+            let uri = format!("/v1/dns/link/{secret}");
+            let peer = peer.to_string();
+            async move {
+                let mut req = Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap();
+                req.extensions_mut().insert(axum::extract::ConnectInfo(
+                    peer.parse::<std::net::SocketAddr>().unwrap(),
+                ));
+                app.oneshot(req).await.unwrap().status()
+            }
+        };
+        assert_eq!(
+            rcode(
+                svc.resolve_from_network(&st, ip("203.0.113.77"), "udp", &blocked)
+                    .await
+                    .map_err(|e| e)
+            ),
+            Err(DohError::NotFound)
+        );
+        assert_eq!(link("203.0.113.77:1").await, StatusCode::OK);
+        assert_eq!(
+            rcode(
+                svc.resolve_from_network(&st, ip("203.0.113.77"), "udp", &blocked)
+                    .await
+            ),
+            Ok(3)
+        );
+        assert_eq!(link("203.0.113.88:1").await, StatusCode::OK);
+        assert_eq!(
+            svc.resolve_from_network(&st, ip("203.0.113.77"), "udp", &blocked)
+                .await,
+            Err(DohError::NotFound),
+            "the old address is released"
+        );
+        assert_eq!(
+            rcode(
+                svc.resolve_from_network(&st, ip("203.0.113.88"), "udp", &blocked)
+                    .await
+            ),
+            Ok(3)
+        );
+        assert_eq!(
+            link("127.0.0.1:1").await,
+            StatusCode::OK,
+            "loopback is registrable only as /32"
+        );
+        assert_eq!(
+            call(&app, "PUT", "/v1/dns/link/hyg_dns_nope", None, None)
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+
+        // delete and audit
+        let (c, _, _) = call(
+            &app,
+            "DELETE",
+            &format!("/v1/admin/dns/networks/{net_id}"),
+            Some(ADMIN),
+            None,
+        )
+        .await;
+        assert_eq!(c, StatusCode::NO_CONTENT);
+        assert_eq!(
+            svc.resolve_from_network(&st, ip("192.168.50.7"), "udp", &blocked)
+                .await,
+            Err(DohError::NotFound)
+        );
+        let (_, _, a) = call(&app, "GET", "/v1/admin/audit", Some(ADMIN), None).await;
+        let a = String::from_utf8_lossy(&a);
+        assert!(
+            a.contains("dns-network.add")
+                && a.contains("dns-network.delete")
+                && a.contains("dns-network.link")
         );
     }
 }

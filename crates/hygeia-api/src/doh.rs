@@ -94,11 +94,20 @@ pub struct Counters {
     pub rate_limited: AtomicU64,
     pub servfail: AtomicU64,
     pub log_dropped: AtomicU64,
+    pub refused: AtomicU64,
 }
 
 struct Bucket {
     tokens: f64,
     at: Instant,
+}
+
+/// A registered client network as the data plane sees it.
+struct NetEntry {
+    cidr: hygeia_core::cidr::Cidr,
+    tenant: String,
+    group: String,
+    id: String,
 }
 
 type AuthCache = HashMap<[u8; 32], (Option<DnsToken>, Instant)>;
@@ -112,6 +121,8 @@ pub struct DnsService {
     ip_buckets: Mutex<HashMap<IpAddr, Bucket>>,
     ip_fail: Mutex<HashMap<IpAddr, Bucket>>,
     settings: Mutex<HashMap<String, (DnsSettings, Instant)>>,
+    networks: std::sync::RwLock<Vec<NetEntry>>,
+    labels: Mutex<HashMap<String, (Option<DnsToken>, Instant)>>,
     log_tx: mpsc::Sender<(String, QueryLogEntry)>,
     log_rx: Mutex<Option<mpsc::Receiver<(String, QueryLogEntry)>>>,
     pub counters: Counters,
@@ -164,6 +175,8 @@ impl DnsService {
             ip_buckets: Mutex::new(HashMap::new()),
             ip_fail: Mutex::new(HashMap::new()),
             settings: Mutex::new(HashMap::new()),
+            networks: std::sync::RwLock::new(Vec::new()),
+            labels: Mutex::new(HashMap::new()),
             log_tx,
             log_rx: Mutex::new(Some(log_rx)),
             counters: Counters::default(),
@@ -174,6 +187,7 @@ impl DnsService {
     /// Forget cached token lookups (called on local revocation; other replicas lag by `TOKEN_TTL`).
     pub fn clear_auth_cache(&self) {
         self.auth.lock().unwrap().clear();
+        self.labels.lock().unwrap().clear();
     }
 
     async fn token(&self, st: &AppState, secret: &str) -> Option<DnsToken> {
@@ -323,6 +337,135 @@ impl DnsService {
         });
     }
 
+    /// Reload the registered networks from the store (also called on local changes).
+    pub async fn refresh_networks(&self, store: &dyn hygeia_store::Store) {
+        match store.all_dns_networks().await {
+            Ok(all) => {
+                let mut v: Vec<NetEntry> = all
+                    .into_iter()
+                    .filter_map(|n| {
+                        Some(NetEntry {
+                            cidr: n.cidr.parse().ok()?,
+                            tenant: n.tenant_id,
+                            group: n.group_id,
+                            id: n.id,
+                        })
+                    })
+                    .collect();
+                // longest prefix first: the most specific registration wins
+                v.sort_by_key(|e| std::cmp::Reverse(e.cidr.prefix()));
+                *self.networks.write().unwrap() = v;
+            }
+            Err(e) => tracing::error!(error = %e, "could not load registered DNS networks"),
+        }
+    }
+
+    /// Refresh the registered networks every 30 s (other replicas' changes become visible).
+    pub fn start_network_refresher(self: &Arc<Self>, store: Arc<dyn hygeia_store::Store>) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            loop {
+                me.refresh_networks(store.as_ref()).await;
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        });
+    }
+
+    /// `(tenant, group, network id)` registered for this source address, most specific first.
+    pub fn network_for(&self, ip: IpAddr) -> Option<(String, String, String)> {
+        self.networks
+            .read()
+            .unwrap()
+            .iter()
+            .find(|e| e.cidr.contains(ip))
+            .map(|e| (e.tenant.clone(), e.group.clone(), e.id.clone()))
+    }
+
+    /// Plain DNS (UDP/TCP) from a registered network. Unregistered sources are refused:
+    /// the service never recurses for strangers.
+    pub async fn resolve_from_network(
+        &self,
+        st: &AppState,
+        ip: IpAddr,
+        transport: &'static str,
+        packet: &[u8],
+    ) -> Result<Vec<u8>, DohError> {
+        if !self.allow_source(ip) {
+            self.counters.rate_limited.fetch_add(1, Ordering::Relaxed);
+            return Err(DohError::RateLimited);
+        }
+        let Some((tenant, group, net)) = self.network_for(ip) else {
+            self.counters.refused.fetch_add(1, Ordering::Relaxed);
+            return Err(DohError::NotFound);
+        };
+        if packet.is_empty() || packet.len() > MAX_QUERY {
+            return Err(DohError::BadRequest);
+        }
+        let ctx = QueryCtx {
+            tenant: &tenant,
+            group: &group,
+            token_id: Some(&net),
+            transport,
+            client: Some(ip),
+        };
+        self.resolve(st, &ctx, packet).await
+    }
+
+    /// DoT/DoQ with an SNI label (token endpoint label), or — when the label does not match a
+    /// token — attribution by the client's registered network.
+    pub async fn resolve_from_label(
+        &self,
+        st: &AppState,
+        label: Option<&str>,
+        ip: IpAddr,
+        transport: &'static str,
+        packet: &[u8],
+    ) -> Result<Vec<u8>, DohError> {
+        if let Some(label) = label
+            && let Some(tok) = self.label_token(st, label).await
+        {
+            if !self.allow_source(ip) || !self.allow(&tok.id) {
+                self.counters.rate_limited.fetch_add(1, Ordering::Relaxed);
+                return Err(DohError::RateLimited);
+            }
+            if packet.is_empty() || packet.len() > MAX_QUERY {
+                return Err(DohError::BadRequest);
+            }
+            let ctx = QueryCtx {
+                tenant: &tok.tenant_id,
+                group: &tok.group_id,
+                token_id: Some(&tok.id),
+                transport,
+                client: Some(ip),
+            };
+            return self.resolve(st, &ctx, packet).await;
+        }
+        self.resolve_from_network(st, ip, transport, packet).await
+    }
+
+    async fn label_token(&self, st: &AppState, label: &str) -> Option<DnsToken> {
+        if label.is_empty() || label.len() > 64 {
+            return None;
+        }
+        if let Some((t, at)) = self.labels.lock().unwrap().get(label) {
+            let ttl = if t.is_some() { TOKEN_TTL } else { NEGATIVE_TTL };
+            if at.elapsed() < ttl {
+                return t.clone();
+            }
+        }
+        let t = st
+            .store
+            .authenticate_dot_label(label, now())
+            .await
+            .unwrap_or(None);
+        let mut c = self.labels.lock().unwrap();
+        if c.len() >= MAX_CACHE {
+            c.clear();
+        }
+        c.insert(label.to_string(), (t.clone(), Instant::now()));
+        t
+    }
+
     /// Pseudonym of a client address: HMAC-SHA256 with a key derived from the master secret, the
     /// tenant and the UTC day, so the same client is stable within a day (statistics) but cannot be
     /// linked across days or tenants, nor reversed without the master secret. IPv6 is reduced to
@@ -365,14 +508,13 @@ impl DnsService {
         self.settings.lock().unwrap().clear();
     }
 
-    /// DoH entry: authenticate the token, rate-limit, then [`resolve`](Self::resolve).
-    pub async fn answer(
+    /// Authenticate a DNS token under the source limits (shared by DoH and the link endpoint).
+    pub async fn authenticate(
         &self,
         st: &AppState,
         secret: &str,
-        packet: &[u8],
         client: Option<IpAddr>,
-    ) -> Result<Vec<u8>, DohError> {
+    ) -> Result<DnsToken, DohError> {
         if let Some(ip) = client
             && !self.allow_source(ip)
         {
@@ -386,6 +528,18 @@ impl DnsService {
             }
             return Err(DohError::NotFound);
         };
+        Ok(tok)
+    }
+
+    /// DoH entry: authenticate the token, rate-limit, then [`resolve`](Self::resolve).
+    pub async fn answer(
+        &self,
+        st: &AppState,
+        secret: &str,
+        packet: &[u8],
+        client: Option<IpAddr>,
+    ) -> Result<Vec<u8>, DohError> {
+        let tok = self.authenticate(st, secret, client).await?;
         if packet.is_empty() || packet.len() > MAX_QUERY {
             return Err(DohError::BadRequest);
         }
