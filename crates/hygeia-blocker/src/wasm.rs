@@ -34,6 +34,11 @@ impl Engine {
         serde_json::to_string(&self.0.check_url(url)).unwrap_or_else(|_| "null".into())
     }
 
+    /// Hot path for blocking `webRequest` listeners: true if the URL's host is blocked.
+    pub fn is_blocked(&self, url: &str) -> bool {
+        self.0.check_url(url).is_some_and(|v| v.is_block())
+    }
+
     /// `{"selectors":[...],"scriptlets":[{"name":..,"args":[..]}]}`
     pub fn cosmetics_for(&self, host: &str) -> String {
         let c = self.0.cosmetics_for(host);

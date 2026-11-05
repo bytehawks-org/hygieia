@@ -1,6 +1,11 @@
 import init, { Engine } from './pkg/hygeia_blocker.js';
 import { injectScriptlets } from './scriptlets.js';
 
+// `browser` (promise-based) on Firefox, `chrome` on Chromium: both are promise-based in MV3.
+const api = globalThis.browser ?? globalThis.chrome;
+// Firefox keeps blocking webRequest in MV3; Chromium needs declarativeNetRequest.
+const IS_FIREFOX = typeof globalThis.browser?.runtime?.getBrowserInfo === 'function';
+
 // Domains per DNR budget. Chrome accepted 1M domains in 1000 grouped rules in testing (the 30k
 // dynamic-rule cap counts rules, and one rule holds many requestDomains); browsing-latency impact
 // at that size is NOT measured, hence the conservative default. Higher-precedence groups are kept first.
@@ -9,8 +14,8 @@ const RESOURCE_TYPES = ['main_frame', 'sub_frame', 'script', 'image', 'styleshee
   'xmlhttprequest', 'ping', 'media', 'font', 'websocket', 'other'];
 
 // ---------- storage ----------
-const get = (keys) => chrome.storage.local.get(keys);
-const set = (obj) => chrome.storage.local.set(obj);
+const get = (keys) => api.storage.local.get(keys);
+const set = (obj) => api.storage.local.set(obj);
 
 function idb() {
   return new Promise((resolve, reject) => {
@@ -67,16 +72,17 @@ function getEngine() {
 }
 
 async function applyDnr(eng) {
+  if (IS_FIREFOX) return { mode: 'webRequest', rules: 0, truncated: 0 }; // enforced per request, see below
   const plan = JSON.parse(eng.dnr_plan(DNR_DOMAIN_BUDGET));
-  const old = await chrome.declarativeNetRequest.getDynamicRules();
+  const old = await api.declarativeNetRequest.getDynamicRules();
   const addRules = plan.rules.map((r, i) => ({
     id: i + 1,
     priority: r.priority,
     action: { type: r.action },
     condition: { requestDomains: r.domains, resourceTypes: RESOURCE_TYPES },
   }));
-  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: old.map((r) => r.id), addRules });
-  return { rules: addRules.length, truncated: plan.truncated };
+  await api.declarativeNetRequest.updateDynamicRules({ removeRuleIds: old.map((r) => r.id), addRules });
+  return { mode: 'dnr', rules: addRules.length, truncated: plan.truncated };
 }
 
 // ---------- sync ----------
@@ -149,13 +155,23 @@ async function enroll({ server, token, pubkey }) {
 }
 
 // ---------- events ----------
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     if (msg.type === 'cosmetics') {
       const eng = await getEngine();
       if (!eng || typeof msg.host !== 'string') return { selectors: [], scriptlets: [] };
       const c = JSON.parse(eng.cosmetics_for(msg.host));
       return { selectors: c.selectors };
+    }
+    if (msg.type === 'insert-css') {
+      // Fallback when the content script cannot adopt a constructed stylesheet (Firefox Xray wrappers).
+      if (typeof msg.css !== 'string' || msg.css.length > 2_000_000 || !sender.tab) return { ok: false };
+      await api.scripting.insertCSS({
+        target: { tabId: sender.tab.id, frameIds: [sender.frameId] },
+        css: msg.css,
+        origin: 'USER', // not subject to the page's CSP
+      });
+      return { ok: true };
     }
     if (msg.type === 'enroll') return enroll(msg);
     if (msg.type === 'sync') return sync();
@@ -165,14 +181,33 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true; // async response
 });
 
-chrome.webNavigation.onCommitted.addListener(async (d) => {
+// Firefox: full engine on every request (no rule-count limits, exact precedence).
+// Registered at top level so the event page is woken for requests.
+if (IS_FIREFOX) {
+  api.webRequest.onBeforeRequest.addListener(
+    async (d) => {
+      // never filter the extension's own traffic (bundle pull, enrolment)
+      if (d.originUrl?.startsWith('moz-extension://') || d.documentUrl?.startsWith('moz-extension://')) return {};
+      try {
+        const eng = await getEngine();
+        return eng && eng.is_blocked(d.url) ? { cancel: true } : {};
+      } catch {
+        return {}; // fail open
+      }
+    },
+    { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] },
+    ['blocking'],
+  );
+}
+
+api.webNavigation.onCommitted.addListener(async (d) => {
   if (!/^https?:/.test(d.url)) return;
   try {
     const eng = await getEngine();
     if (!eng) return;
     const calls = JSON.parse(eng.cosmetics_for(new URL(d.url).hostname)).scriptlets;
     if (!calls.length) return;
-    await chrome.scripting.executeScript({
+    await api.scripting.executeScript({
       target: { tabId: d.tabId, frameIds: [d.frameId] },
       world: 'MAIN',
       injectImmediately: true,
@@ -182,7 +217,7 @@ chrome.webNavigation.onCommitted.addListener(async (d) => {
   } catch { /* tab gone or restricted page */ }
 });
 
-chrome.alarms.create('hygeia-sync', { periodInMinutes: 30 });
-chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'hygeia-sync') sync().catch(() => {}); });
-chrome.runtime.onStartup.addListener(() => sync().catch(() => {}));
-chrome.runtime.onInstalled.addListener(() => sync().catch(() => {}));
+api.alarms.create('hygeia-sync', { periodInMinutes: 30 });
+api.alarms.onAlarm.addListener((a) => { if (a.name === 'hygeia-sync') sync().catch(() => {}); });
+api.runtime.onStartup.addListener(() => sync().catch(() => {}));
+api.runtime.onInstalled.addListener(() => sync().catch(() => {}));

@@ -1,1 +1,1 @@
-{ "name": "hygeia-blocker-extension", "private": true, "type": "module", "scripts": { "test": "node --test test/scriptlets.test.mjs" } }
+{ "name": "hygeia-blocker-extension", "private": true, "type": "module", "scripts": { "test": "node --test test/scriptlets.test.mjs test/background.test.mjs" } }

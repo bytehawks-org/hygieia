@@ -47,4 +47,6 @@ jobs:
         with:
           node-version: 22
       - run: ./extension/build.sh
-      - run: node --test extension/test/scriptlets.test.mjs
+      - run: node --test extension/test/*.test.mjs
+      - run: node extension/package.mjs firefox
+      - run: npx --yes web-ext@10 lint -s extension/dist/firefox
