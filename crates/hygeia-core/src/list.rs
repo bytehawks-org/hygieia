@@ -5,7 +5,8 @@
 
 use crate::domain::normalize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ListFormat {
     /// `0.0.0.0 domain` / `127.0.0.1 domain`
     Hosts,

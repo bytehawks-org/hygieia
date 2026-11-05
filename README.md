@@ -27,13 +27,47 @@ flowchart TD
 | Crate | State |
 |---|---|
 | `hygeia-core` | Done: trie matcher, hosts/domains/ABP(domain-level) parsers, policy, cosmetic model, signed bundle. Tested; builds for wasm32 |
+| `hygeia-lists` | Catalogue (HaGeZi, StevenBlack, URLhaus, EasyList/EasyPrivacy, uBlock filters), https-only downloader with ETag/304 and size cap, parsing at refresh time, shrink/empty guards, per-source status. Missing: scheduler persistence, per-tenant source selection, AdGuard/other scriptlet dialects |
 | `hygeia-audit` | Done: hash chain, verify, CEF. Missing: syslog/OTLP sinks, external head anchoring |
 | `hygeia-store` | PostgreSQL (sqlx) is the production store: RLS tenant isolation, per-tenant audit chain, composite FKs. RBAC model (roles/permissions, `users`, `role_bindings`, `api_tokens` tables). In-memory store for tests. Missing: RBAC enforcement in the API (needs OIDC), list catalogue/subscription queries, sqlx offline cache |
-| `hygeia-api` | Enroll, bundle (ETag/304), rules CRUD, simulate (dry-run), audit + verify. Static admin token. Missing: OIDC + RBAC wiring, OpenAPI (utoipa), gRPC, list downloader/scheduler, groups/time windows, regex rules |
+| `hygeia-api` | Enroll, bundle (ETag/304), rules CRUD, simulate (dry-run), audit + verify. Static admin token. `/v1/admin/lists` (+`/refresh`). Missing: OIDC + RBAC wiring, OpenAPI (utoipa), gRPC, groups/time windows, regex rules |
 | `hygeia-dns` | UDP server, block via NXDOMAIN/null IP, plain UDP upstream. Missing: TCP, DoT/DoH/DoQ, DoT upstream, tenant resolution, query log, metrics |
 | `hygeia-proxy` | Skeleton (CONNECT host decision) |
 | `hygeia-blocker` | Skeleton (URL host check) |
 | `web/` | Not started (planned: Next.js static export + Tailwind, served by the API) |
+
+## Filter lists
+
+Downloaded at runtime (never vendored), default every 12 h, bounded to 64 MiB per list, https only. Each source records license and attribution into the signed bundle. Select sources in `hygeia.toml`:
+
+```toml
+[lists]
+refresh_hours = 12
+sources = ["hagezi-pro", "easylist", "ublock-filters", "ublock-quick-fixes"]  # unset = catalogue defaults
+
+[[lists.custom]]            # license + attribution are mandatory
+id = "mine"
+name = "My list"
+url = "https://example.com/list.txt"
+format = "domains"          # hosts | domains | abp
+license = "CC0-1.0"
+attribution = "me"
+network = true              # feeds DNS / proxy
+cosmetic = false            # feeds the blocker (element hiding + scriptlets)
+```
+
+Two kinds of rules, kept separate per source (`network` / `cosmetic`): domain rules (DNS, proxy) and DOM/JS rules (element hiding, `##+js(...)` scriptlet calls for the blocker). Lists are untrusted input:
+
+- selectors are validated against CSS rule breakout (`}`, `;`, `@`, `url(`, unbalanced quotes/brackets) before they can reach a page;
+- scriptlets are shipped as *data* (name + args); `trusted-*` scriptlets, which are privileged in uBlock Origin, are dropped by default;
+- procedural selectors (`:has-text`, `:xpath`, ...), HTML filters (`##^`), `#?#`, `#$#`, AdGuard `#%#` and entity domains (`google.*`) are skipped and counted per source;
+- a refresh that returns no usable rules, or shrinks below 50% of the previous count, is rejected and the previous copy is kept.
+
+Footprint measured on HaGeZi PRO (240k domains): trie build ~0.2 s, +63 MB RSS, ~0.8 µs/lookup; signed bundle ~4.8 MB (uncompressed). `hagezi-tif` (1.7M domains) is off by default for that reason.
+
+Licenses in the catalogue are GPL-3.0 (HaGeZi, uBlock filters), GPL-3.0-or-later OR CC-BY-SA-3.0 (EasyList family), MIT (StevenBlack), CC0 (URLhaus). Not bundling the lists avoids copyleft on this code, but **redistributing list-derived bundles to third parties is a separate question: verify before offering Hygieia as a service to other organisations.**
+
+Live check against upstream: `cargo test -p hygeia-lists --test live -- --ignored --nocapture`.
 
 ## Try it
 
@@ -53,7 +87,7 @@ upstream = ["192.168.1.1:53"]
 block_mode = "nxdomain"   # or "null_ip"
 ```
 
-Persistence (PostgreSQL 14+; without it the store is in-memory and non-persistent):
+Persistence (PostgreSQL 17 baseline (schema needs 15+); without it the store is in-memory and non-persistent):
 
 ```bash
 export HYGEIA_DATABASE_URL=postgres://hygeia_app:***@db/hygeia   # runtime role: non-owner, subject to RLS

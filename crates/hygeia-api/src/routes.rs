@@ -26,6 +26,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/admin/devices/{id}", delete(revoke_device))
         .route("/v1/admin/rules", get(list_rules).post(add_rule))
         .route("/v1/admin/rules/{id}", delete(delete_rule))
+        .route("/v1/admin/lists", get(lists_status))
+        .route("/v1/admin/lists/refresh", post(lists_refresh))
         .route("/v1/admin/simulate", post(simulate))
         .route("/v1/admin/audit", get(audit))
         .route("/v1/admin/audit/verify", get(audit_verify))
@@ -292,6 +294,17 @@ async fn delete_rule(
     }
 }
 
+async fn lists_status(State(st): S, h: HeaderMap) -> Response {
+    admin!(st, h);
+    Json(st.list_status()).into_response()
+}
+
+async fn lists_refresh(State(st): S, h: HeaderMap) -> Response {
+    admin!(st, h);
+    st.refresh_requested.notify_one();
+    StatusCode::ACCEPTED.into_response()
+}
+
 #[derive(Deserialize)]
 struct SimReq {
     #[serde(default = "d_tenant")]
@@ -547,5 +560,70 @@ mod tests {
         let text = String::from_utf8(b).unwrap();
         assert!(!text.contains(&token) && !text.contains(&dsecret));
         assert!(text.contains("rule.create") && text.contains("device.revoke"));
+    }
+
+    #[tokio::test]
+    async fn lists_flow_into_bundle() {
+        use hygeia_core::cosmetic::{CosmeticRules, HostRules, ScriptletCall};
+        use hygeia_core::{ParsedSource, SourceMeta};
+        let (app, st) = app();
+        let mut cos = CosmeticRules {
+            generic: vec![".ad".into()],
+            ..Default::default()
+        };
+        cos.by_host.insert(
+            "a.com".into(),
+            HostRules {
+                scriptlets: vec![ScriptletCall {
+                    name: "set-constant".into(),
+                    args: vec!["x".into(), "1".into()],
+                }],
+                ..Default::default()
+            },
+        );
+        st.set_lists(
+            vec![Arc::new(ParsedSource {
+                meta: SourceMeta {
+                    id: "l1".into(),
+                    name: "L1".into(),
+                    url: "https://x".into(),
+                    license: "MIT".into(),
+                    attribution: "me".into(),
+                },
+                allow: vec![],
+                block: vec!["tracker.test".into()],
+                cosmetic: cos,
+            })],
+            json!([{"id": "l1", "license": "MIT"}]),
+        );
+        let b = st.bundle_for(DEFAULT_TENANT, DEFAULT_GROUP).await.unwrap();
+        let bundle = SignedBundle::open(&b.0, &st.signing_key.verifying_key()).unwrap();
+        assert_eq!(bundle.network.lists[0].block, vec!["tracker.test"]);
+        assert_eq!(bundle.cosmetic.generic, vec![".ad"]);
+        assert_eq!(
+            bundle.cosmetic.by_host["a.com"].scriptlets[0].name,
+            "set-constant"
+        );
+        assert_eq!(bundle.meta.sources[0].license, "MIT");
+
+        assert_eq!(
+            call(&app, "GET", "/v1/admin/lists", None, None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (s, _, body) = call(&app, "GET", "/v1/admin/lists", Some("admin-secret"), None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(String::from_utf8(body).unwrap().contains("\"MIT\""));
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/v1/admin/lists/refresh",
+                Some("admin-secret"),
+                None
+            )
+            .await
+            .0,
+            StatusCode::ACCEPTED
+        );
     }
 }

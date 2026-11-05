@@ -8,7 +8,9 @@ use hygeia_core::SignedBundle;
 use hygeia_store::{Result as StoreResult, Store};
 use serde_json::Value;
 
-use crate::build::{ListInput, compile};
+use hygeia_core::ParsedSource;
+
+use crate::build::compile;
 
 pub use hygeia_store::{DEFAULT_GROUP_ID as DEFAULT_GROUP, DEFAULT_TENANT_ID as DEFAULT_TENANT};
 
@@ -22,7 +24,10 @@ pub struct AppState {
     pub store: Arc<dyn Store>,
     pub signing_key: SigningKey,
     pub admin_token_hash: [u8; 32],
-    lists: RwLock<Vec<ListInput>>,
+    lists: RwLock<Vec<Arc<ParsedSource>>>,
+    list_status: RwLock<Value>,
+    /// Notified by `POST /v1/admin/lists/refresh`; the list refresher awaits it.
+    pub refresh_requested: Arc<tokio::sync::Notify>,
     cache: Mutex<HashMap<(String, String), Arc<SignedBundle>>>,
 }
 
@@ -33,13 +38,26 @@ impl AppState {
             signing_key,
             admin_token_hash: hygeia_store::hash_secret(admin_token),
             lists: RwLock::new(Vec::new()),
+            list_status: RwLock::new(Value::Array(vec![])),
+            refresh_requested: Arc::new(tokio::sync::Notify::new()),
             cache: Mutex::new(HashMap::new()),
         }
     }
 
-    pub fn set_lists(&self, lists: Vec<ListInput>) {
+    /// Install freshly parsed sources and their status report; invalidates bundles.
+    pub fn set_lists(&self, lists: Vec<Arc<ParsedSource>>, status: Value) {
         *self.lists.write().unwrap() = lists;
+        *self.list_status.write().unwrap() = status;
         self.invalidate();
+    }
+
+    /// Update only the status report (content unchanged: bundles stay valid).
+    pub fn set_list_status(&self, status: Value) {
+        *self.list_status.write().unwrap() = status;
+    }
+
+    pub fn list_status(&self) -> Value {
+        self.list_status.read().unwrap().clone()
     }
 
     /// Drop cached bundles; next pull recompiles with a new version.

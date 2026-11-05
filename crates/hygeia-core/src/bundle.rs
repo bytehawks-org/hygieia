@@ -26,6 +26,15 @@ pub struct SourceMeta {
     pub attribution: String,
 }
 
+/// A downloaded source after parsing: network (domain) rules and cosmetic rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedSource {
+    pub meta: SourceMeta,
+    pub allow: Vec<String>,
+    pub block: Vec<String>,
+    pub cosmetic: CosmeticRules,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Meta {
     /// Monotonic per tenant/group; clients refuse downgrades.

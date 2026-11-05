@@ -8,6 +8,7 @@ use ed25519_dalek::SigningKey;
 use hygeia_api::{AppState, DEFAULT_GROUP, DEFAULT_TENANT};
 use hygeia_core::{Ruleset, SignedBundle};
 use hygeia_dns::{BlockMode, DnsConfig};
+use hygeia_lists::{HttpFetcher, Manager};
 use hygeia_store::{MemoryStore, PgStore, Store};
 
 fn rand_hex(n: usize) -> String {
@@ -117,6 +118,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move {
             if let Err(e) = hygeia_dns::serve_udp(sock, rules, dns_cfg).await {
                 tracing::error!(error = %e, "dns server stopped");
+            }
+        });
+    }
+
+    if cfg.lists.enabled {
+        let sources = cfg.lists.resolve()?;
+        let manager = Manager::new(sources, Arc::new(HttpFetcher::new(64 << 20, false)?), false);
+        let interval = Duration::from_secs(cfg.lists.refresh_hours.max(1) * 3600);
+        let st = state.clone();
+        tokio::spawn(async move {
+            let mut first = true;
+            loop {
+                let r = manager.refresh().await;
+                let status = serde_json::to_value(&r.status).unwrap_or_default();
+                if r.changed || first {
+                    st.set_lists(r.sources, status);
+                    tracing::info!(sources = r.status.len(), "lists updated");
+                } else {
+                    st.set_list_status(status);
+                }
+                first = false;
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {}
+                    _ = st.refresh_requested.notified() => tracing::info!("list refresh requested"),
+                }
             }
         });
     }

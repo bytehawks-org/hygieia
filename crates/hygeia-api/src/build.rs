@@ -1,19 +1,10 @@
 //! Compile rules + lists into a signed bundle.
 
-use hygeia_core::cosmetic::CosmeticRules;
-use hygeia_core::{
-    Bundle, ListData, ListFormat, Meta, RulesetData, SignedBundle, SourceMeta, normalize,
-    parse_list,
-};
-use hygeia_store::{Rule, RuleAction};
+use std::sync::Arc;
 
-/// A downloaded list plus its provenance (license/attribution travel in the bundle).
-#[derive(Debug, Clone)]
-pub struct ListInput {
-    pub meta: SourceMeta,
-    pub format: ListFormat,
-    pub text: String,
-}
+use hygeia_core::cosmetic::CosmeticRules;
+use hygeia_core::{Bundle, ListData, Meta, ParsedSource, RulesetData, SignedBundle, normalize};
+use hygeia_store::{Rule, RuleAction};
 
 pub fn compile(
     tenant_id: &str,
@@ -21,7 +12,7 @@ pub fn compile(
     version: u64,
     now: i64,
     rules: &[Rule],
-    lists: &[ListInput],
+    lists: &[Arc<ParsedSource>],
     key: &ed25519_dalek::SigningKey,
 ) -> SignedBundle {
     let mut data = RulesetData::default();
@@ -34,13 +25,14 @@ pub fn compile(
             RuleAction::Block => data.custom_block.push(p),
         }
     }
+    let mut cosmetic = CosmeticRules::default();
     for l in lists {
-        let p = parse_list(l.format, &l.text);
         data.lists.push(ListData {
             id: l.meta.id.clone(),
-            allow: p.allow,
-            block: p.block,
+            allow: l.allow.clone(),
+            block: l.block.clone(),
         });
+        cosmetic.merge(l.cosmetic.clone());
     }
     let bundle = Bundle {
         meta: Meta {
@@ -51,7 +43,7 @@ pub fn compile(
             sources: lists.iter().map(|l| l.meta.clone()).collect(),
         },
         network: data,
-        cosmetic: CosmeticRules::default(),
+        cosmetic,
     };
     SignedBundle::sign(&bundle, key)
 }
