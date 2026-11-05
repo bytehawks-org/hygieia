@@ -24,7 +24,7 @@ Self-hosted, multi-tenant, auditable. Written in Rust.
 [Getting started](docs/guides/getting-started.md) ·
 [Architecture](docs/architecture/overview.md) ·
 [API](docs/reference/api.md) ·
-[Roadmap](docs/ROADMAP.md)
+[Roadmap](docs/ROADMAP.md) · [Changelog](CHANGELOG.md)
 
 </div>
 
@@ -117,7 +117,7 @@ Releases are cut by tagging `vX.Y.Z` (workflow `release`, draft release with `SH
 | Cloud DNS: DoH, DoT, DoQ, plain UDP/TCP for registered networks; upstream failover over UDP/DoT/DoH; per-token, per-source and failed-auth limits; per-tenant policy; opt-in pseudonymised query log with retention; Prometheus metrics; native HTTPS with certificate hot-reload | implemented, tested in-process and by smoke scenarios; **not load-tested, no DNSSEC validation, no HTTP/3** |
 | Packaging: `.deb`, systemd, Windows service/tray | see *Install* |
 | OpenAPI 3.1 + generated TypeScript types/client | done: [API](docs/reference/api.md#openapi-and-the-generated-typescript-client) |
-| Node-side cloud forwarding | planned: [Roadmap](docs/ROADMAP.md) |
+| Node-side cloud forwarding | planned: [Roadmap](docs/ROADMAP.md) · [Changelog](CHANGELOG.md) |
 
 ## Documentation
 
@@ -127,7 +127,7 @@ Releases are cut by tagging `vX.Y.Z` (workflow `release`, draft release with `SH
 | **Reference** | [Configuration](docs/reference/configuration.md) · [API](docs/reference/api.md) · [CLI](docs/reference/cli.md) · [Data formats](docs/reference/data-formats.md) |
 | **Design** | [Overview](docs/architecture/overview.md) · [Node](docs/architecture/node.md) · [DNS service](docs/architecture/dns-service.md) |
 | **Trust** | [Security](docs/security.md) · [Privacy and compliance](docs/privacy-compliance.md) |
-| **Running it** | [Operations](docs/operations.md) · [Testing](docs/testing.md) · [Development](docs/development.md) · [Roadmap](docs/ROADMAP.md) |
+| **Running it** | [Operations](docs/operations.md) · [Testing](docs/testing.md) · [Development](docs/development.md) · [Roadmap](docs/ROADMAP.md) · [Changelog](CHANGELOG.md) |
 
 ## Security in one paragraph
 
