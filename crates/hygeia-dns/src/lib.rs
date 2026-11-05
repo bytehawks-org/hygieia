@@ -117,6 +117,19 @@ pub async fn serve_udp(
     }
 }
 
+/// `(qname, qtype)` of a single-question query, for logging; `None` if it does not parse.
+pub fn question(packet: &[u8]) -> Option<(String, String)> {
+    let m = Message::from_vec(packet).ok()?;
+    let q = m.queries.first()?;
+    Some((
+        q.name()
+            .to_ascii()
+            .trim_end_matches('.')
+            .to_ascii_lowercase(),
+        q.query_type().to_string(),
+    ))
+}
+
 /// SERVFAIL reply for `packet` (empty if it cannot be parsed).
 pub fn servfail(packet: &[u8]) -> Vec<u8> {
     Message::from_vec(packet)

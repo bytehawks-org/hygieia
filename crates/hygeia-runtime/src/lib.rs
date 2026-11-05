@@ -92,6 +92,45 @@ pub fn spawn_list_refresher(state: Arc<AppState>, manager: Manager, interval: Du
     });
 }
 
+/// Delete query-log entries older than each tenant's retention. Returns the number deleted.
+pub async fn purge_query_logs_once(state: &AppState) -> u64 {
+    let tenants = match state.store.list_tenants().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(error = %e, "query log purge: cannot list tenants");
+            return 0;
+        }
+    };
+    let mut total = 0;
+    for t in tenants {
+        let days = state
+            .store
+            .dns_settings(&t.id)
+            .await
+            .map_or(30, |s| s.retention_days);
+        let cutoff = hygeia_api::now() - i64::from(days) * 86_400;
+        match state.store.purge_query_log(&t.id, cutoff).await {
+            Ok(n) => total += n,
+            Err(e) => tracing::error!(tenant = %t.id, error = %e, "query log purge failed"),
+        }
+    }
+    if total > 0 {
+        tracing::info!(deleted = total, "query log retention applied");
+    }
+    total
+}
+
+/// Apply retention hourly (the first pass runs shortly after start).
+pub fn spawn_query_log_purger(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        loop {
+            purge_query_logs_once(&state).await;
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
+    });
+}
+
 /// Keep a lock-free ruleset in step with the control plane's signed bundle for one (tenant, group).
 pub fn spawn_dns_follower(
     state: Arc<AppState>,
@@ -160,6 +199,66 @@ pub async fn spawn_dns_server(
 pub fn origin_of(url: &str) -> Option<String> {
     let (scheme, rest) = url.split_once("://")?;
     Some(format!("{scheme}://{}", rest.split('/').next()?))
+}
+
+#[cfg(test)]
+mod purge_tests {
+    use super::*;
+    use hygeia_api::AuthConfig;
+    use hygeia_store::{DnsSettings, MemoryStore, QueryLogEntry, Store};
+
+    #[tokio::test]
+    async fn retention_is_applied_per_tenant() {
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        store.bootstrap_default().await.unwrap();
+        let other = store.create_tenant("other", "Other").await.unwrap();
+        let now = hygeia_api::now();
+        let e = |ts: i64| QueryLogEntry {
+            ts,
+            group_id: "g".into(),
+            token_id: None,
+            transport: "doh".into(),
+            client: "c".into(),
+            qname: "a.test".into(),
+            qtype: "A".into(),
+            action: "allow".into(),
+            reason: "Default".into(),
+        };
+        let day = 86_400;
+        let old = now - 8 * day;
+        let mid = now - 2 * day;
+        // default tenant: 30 days (default) keeps everything; `other`: 3 days drops the 8-day-old one
+        store
+            .append_query_log(hygeia_store::DEFAULT_TENANT_ID, &[e(old), e(mid), e(now)])
+            .await
+            .unwrap();
+        store
+            .append_query_log(&other.id, &[e(old), e(mid), e(now)])
+            .await
+            .unwrap();
+        store
+            .set_dns_settings(
+                &other.id,
+                DnsSettings {
+                    retention_days: 3,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let state = AppState::new(
+            store.clone(),
+            ed25519_dalek::SigningKey::from_bytes(&[1; 32]),
+            AuthConfig::default(),
+        );
+        assert_eq!(purge_query_logs_once(&state).await, 1);
+        let count = |t: String| {
+            let store = store.clone();
+            async move { store.query_log(&t, 0, 10, None, None).await.unwrap().len() }
+        };
+        assert_eq!(count(hygeia_store::DEFAULT_TENANT_ID.into()).await, 3);
+        assert_eq!(count(other.id.clone()).await, 2);
+    }
 }
 
 #[cfg(test)]

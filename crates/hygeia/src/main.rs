@@ -63,6 +63,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (auth, public) = build_auth(&cfg, &store).await?;
     let mut state = AppState::new(store, signing_key, auth);
     state.public = public;
+    state.trusted_proxies = cfg
+        .api
+        .trusted_proxies
+        .iter()
+        .map(|c| c.parse().map_err(|e| format!("api.trusted_proxies: {e}")))
+        .collect::<Result<_, String>>()?;
     if cfg.cloud_dns.enabled {
         let c = &cfg.cloud_dns;
         let mut d = hygeia_api::doh::DnsServiceConfig::new(
@@ -77,12 +83,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         d.rate_per_sec = c.rate_per_sec;
         d.burst = c.burst;
         d.fail_open = c.fail_open;
-        state.dns = Some(Arc::new(hygeia_api::doh::DnsService::new(d)));
+        match std::env::var("HYGEIA_LOG_KEY") {
+            Ok(h) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => {
+                for (i, c) in h.as_bytes().chunks(2).enumerate() {
+                    d.log_key[i] = u8::from_str_radix(std::str::from_utf8(c)?, 16)?;
+                }
+            }
+            _ => tracing::warn!(
+                "HYGEIA_LOG_KEY (64 hex chars) not set: query-log pseudonyms use a per-process key (they change at every restart)"
+            ),
+        }
+        let svc = Arc::new(hygeia_api::doh::DnsService::new(d));
+        svc.start_log_writer(state.store.clone());
+        state.dns = Some(svc);
         tracing::info!(
             "cloud DNS (DoH) enabled at /dns-query/<token>; terminate TLS in front and redact the path in logs"
         );
     }
     let state = Arc::new(state);
+    if cfg.cloud_dns.enabled {
+        hygeia_runtime::spawn_query_log_purger(state.clone());
+    }
 
     // Data plane: DNS follows the control plane by pulling the signed bundle.
     if cfg.dns.enabled {

@@ -30,6 +30,8 @@ pub struct AppState {
     pub public: crate::routes::PublicConfig,
     /// Cloud DNS over HTTPS (`/dns-query/<token>`); `None` = disabled (404).
     pub dns: Option<Arc<crate::doh::DnsService>>,
+    /// Reverse proxies whose `X-Forwarded-For` is believed (everyone else's is ignored).
+    pub trusted_proxies: Vec<hygeia_core::cidr::Cidr>,
     lists: RwLock<Vec<Arc<ParsedSource>>>,
     list_status: RwLock<Value>,
     /// Notified by `POST /v1/admin/lists/refresh`; the list refresher awaits it.
@@ -83,6 +85,7 @@ impl AppState {
             auth,
             public: Default::default(),
             dns: None,
+            trusted_proxies: Vec::new(),
             lists: RwLock::new(Vec::new()),
             list_status: RwLock::new(Value::Array(vec![])),
             refresh_requested: Arc::new(tokio::sync::Notify::new()),

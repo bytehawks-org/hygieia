@@ -78,6 +78,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/admin/dns-tokens/{id}", delete(revoke_dns_token))
         .route(
+            "/v1/admin/dns/settings",
+            get(get_dns_settings).put(put_dns_settings),
+        )
+        .route(
+            "/v1/admin/dns/query-log",
+            get(get_query_log).delete(clear_query_log),
+        )
+        .route("/v1/admin/dns/stats", get(dns_stats))
+        .route(
             "/dns-query/{token}",
             get(doh_get)
                 .post(doh_post)
@@ -635,6 +644,41 @@ async fn revoke_dns_token(
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// Address of the client: the TCP peer, or — only when the peer is a configured trusted proxy —
+/// the right-most `X-Forwarded-For` entry that is not itself a trusted proxy.
+struct ClientIp(Option<std::net::IpAddr>);
+
+impl axum::extract::FromRequestParts<Arc<AppState>> for ClientIp {
+    type Rejection = std::convert::Infallible;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        st: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let peer = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|c| c.0.ip());
+        let trusted = |ip: std::net::IpAddr| st.trusted_proxies.iter().any(|c| c.contains(ip));
+        let Some(peer) = peer else {
+            return Ok(ClientIp(None));
+        };
+        if !trusted(peer) {
+            return Ok(ClientIp(Some(peer)));
+        }
+        let xff = parts
+            .headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let hops: Vec<std::net::IpAddr> = xff
+            .split(',')
+            .filter_map(|h| h.trim().parse().ok())
+            .collect();
+        let client = hops.iter().rev().find(|ip| !trusted(**ip)).or(hops.first());
+        Ok(ClientIp(Some(client.copied().unwrap_or(peer))))
+    }
+}
+
 fn doh_response(r: Result<Vec<u8>, crate::doh::DohError>) -> Response {
     use crate::doh::DohError;
     match r {
@@ -658,7 +702,12 @@ struct DohQ {
     dns: Option<String>,
 }
 
-async fn doh_get(State(st): S, Path(token): Path<String>, Query(q): Query<DohQ>) -> Response {
+async fn doh_get(
+    State(st): S,
+    ClientIp(ip): ClientIp,
+    Path(token): Path<String>,
+    Query(q): Query<DohQ>,
+) -> Response {
     use base64::Engine;
     let Some(svc) = st.dns.clone() else {
         return StatusCode::NOT_FOUND.into_response();
@@ -669,13 +718,14 @@ async fn doh_get(State(st): S, Path(token): Path<String>, Query(q): Query<DohQ>)
             .ok()
     }) else {
         // still authenticate first so garbage tokens and garbage queries look alike
-        return doh_response(svc.answer(&st, &token, &[]).await);
+        return doh_response(svc.answer(&st, &token, &[], ip).await);
     };
-    doh_response(svc.answer(&st, &token, &packet).await)
+    doh_response(svc.answer(&st, &token, &packet, ip).await)
 }
 
 async fn doh_post(
     State(st): S,
+    ClientIp(ip): ClientIp,
     Path(token): Path<String>,
     headers: HeaderMap,
     body: axum::body::Bytes,
@@ -690,7 +740,155 @@ async fn doh_post(
     {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
-    doh_response(svc.answer(&st, &token, &body).await)
+    doh_response(svc.answer(&st, &token, &body, ip).await)
+}
+
+#[derive(Deserialize)]
+struct DnsSettingsBody {
+    tenant_id: Option<String>,
+    log_enabled: bool,
+    retention_days: u32,
+    fail_open: Option<bool>,
+    block_mode: Option<String>,
+}
+
+async fn get_dns_settings(State(st): S, h: HeaderMap, Query(q): Query<TenantQ>) -> Response {
+    let (_, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::RulesRead,
+            q.tenant_id,
+            "dns-settings.get"
+        )
+        .await
+    );
+    Json(ok_or!(st.store.dns_settings(&tenant).await)).into_response()
+}
+
+async fn put_dns_settings(State(st): S, h: HeaderMap, Json(b): Json<DnsSettingsBody>) -> Response {
+    let (p, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::GroupsManage,
+            b.tenant_id,
+            "dns-settings.set"
+        )
+        .await
+    );
+    if !(1..=365).contains(&b.retention_days)
+        || b.block_mode
+            .as_deref()
+            .is_some_and(|m| m != "nxdomain" && m != "null_ip")
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let new = hygeia_store::DnsSettings {
+        log_enabled: b.log_enabled,
+        retention_days: b.retention_days,
+        fail_open: b.fail_open,
+        block_mode: b.block_mode,
+    };
+    let before = ok_or!(st.store.dns_settings(&tenant).await);
+    ok_or!(st.store.set_dns_settings(&tenant, new.clone()).await);
+    if let Some(svc) = &st.dns {
+        svc.clear_settings_cache();
+    }
+    st.record(
+        &tenant,
+        &p.actor(),
+        "dns-settings.set",
+        &tenant,
+        Some(json!({"before": before, "after": new})),
+    )
+    .await;
+    Json(new).into_response()
+}
+
+#[derive(Deserialize)]
+struct LogQ {
+    tenant_id: Option<String>,
+    since: Option<i64>,
+    limit: Option<u32>,
+    q: Option<String>,
+    action: Option<String>,
+}
+
+async fn get_query_log(State(st): S, h: HeaderMap, Query(q): Query<LogQ>) -> Response {
+    let (_, tenant) =
+        gate!(guard(&st, &h, Permission::AuditRead, q.tenant_id, "dns-log.read").await);
+    let limit = q.limit.unwrap_or(100).clamp(1, 1000);
+    Json(ok_or!(
+        st.store
+            .query_log(
+                &tenant,
+                q.since.unwrap_or(0),
+                limit,
+                q.q.as_deref(),
+                q.action.as_deref()
+            )
+            .await
+    ))
+    .into_response()
+}
+
+async fn clear_query_log(State(st): S, h: HeaderMap, Query(q): Query<TenantQ>) -> Response {
+    let (p, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::GroupsManage,
+            q.tenant_id,
+            "dns-log.clear"
+        )
+        .await
+    );
+    let n = ok_or!(st.store.purge_query_log(&tenant, i64::MAX).await);
+    st.record(
+        &tenant,
+        &p.actor(),
+        "dns-log.clear",
+        &tenant,
+        Some(json!({"deleted": n})),
+    )
+    .await;
+    Json(json!({"deleted": n})).into_response()
+}
+
+/// Aggregates over (at most) the 50 000 newest entries since `since`.
+async fn dns_stats(State(st): S, h: HeaderMap, Query(q): Query<LogQ>) -> Response {
+    use std::collections::HashMap;
+    let (_, tenant) =
+        gate!(guard(&st, &h, Permission::AuditRead, q.tenant_id, "dns-log.stats").await);
+    let entries = ok_or!(
+        st.store
+            .query_log(&tenant, q.since.unwrap_or(0), 50_000, None, None)
+            .await
+    );
+    let (mut blocked, mut top_b, mut top_c, mut by_t) =
+        (0u64, HashMap::new(), HashMap::new(), HashMap::new());
+    for e in &entries {
+        *top_c.entry(e.client.clone()).or_insert(0u64) += 1;
+        *by_t.entry(e.transport.clone()).or_insert(0u64) += 1;
+        if e.action == "block" {
+            blocked += 1;
+            *top_b.entry(e.qname.clone()).or_insert(0u64) += 1;
+        }
+    }
+    let top = |m: HashMap<String, u64>| {
+        let mut v: Vec<_> = m.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        v.truncate(10);
+        v.into_iter()
+            .map(|(k, n)| json!({"key": k, "count": n}))
+            .collect::<Vec<_>>()
+    };
+    Json(json!({
+        "queries": entries.len(), "blocked": blocked,
+        "top_blocked": top(top_b), "top_clients": top(top_c), "by_transport": top(by_t),
+    }))
+    .into_response()
 }
 
 // ---------------------------------------------------------------- devices, enrollment
@@ -2320,5 +2518,254 @@ mod tests {
             doh(&app, "hyg_dns_x", &dns_query("example.org")).await.0,
             StatusCode::NOT_FOUND
         );
+    }
+
+    async fn doh_from(
+        app: &Router,
+        token: &str,
+        q: &[u8],
+        peer: &str,
+        xff: Option<&str>,
+    ) -> StatusCode {
+        let mut rb = Request::builder()
+            .method("POST")
+            .uri(format!("/dns-query/{token}"))
+            .header("content-type", "application/dns-message");
+        if let Some(x) = xff {
+            rb = rb.header("x-forwarded-for", x);
+        }
+        let mut req = rb.body(Body::from(q.to_vec())).unwrap();
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            peer.parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        app.clone().oneshot(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn query_log_is_opt_in_pseudonymised_scoped_and_purgeable() {
+        let upstream = fake_upstream().await;
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        store.bootstrap_default().await.unwrap();
+        let mut state = AppState::new(
+            store.clone(),
+            SigningKey::from_bytes(&[1u8; 32]),
+            AuthConfig {
+                break_glass: Some(BreakGlass::new(ADMIN, None).unwrap()),
+                ..Default::default()
+            },
+        );
+        let svc = Arc::new(crate::doh::DnsService::new(
+            crate::doh::DnsServiceConfig::new(upstream),
+        ));
+        svc.start_log_writer(store.clone());
+        state.dns = Some(svc);
+        state.trusted_proxies = vec!["10.0.0.0/8".parse().unwrap()];
+        let app = router(Arc::new(state));
+        let (_, _, b) = call(
+            &app,
+            "POST",
+            "/v1/admin/dns-tokens",
+            Some(ADMIN),
+            Some(json!({"name": "t"})),
+        )
+        .await;
+        let tok = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        call(
+            &app,
+            "POST",
+            "/v1/admin/rules",
+            Some(ADMIN),
+            Some(json!({"action": "block", "pattern": "ads.example.com"})),
+        )
+        .await;
+
+        // default: nothing is logged
+        assert_eq!(
+            doh_from(
+                &app,
+                &tok,
+                &dns_query("ads.example.com"),
+                "203.0.113.7:5000",
+                None
+            )
+            .await,
+            StatusCode::OK
+        );
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let (_, _, b) = call(&app, "GET", "/v1/admin/dns/query-log", Some(ADMIN), None).await;
+        assert_eq!(
+            String::from_utf8_lossy(&b),
+            "[]",
+            "the log is off by default"
+        );
+
+        // settings validation, then enable
+        let (c, _, _) = call(
+            &app,
+            "PUT",
+            "/v1/admin/dns/settings",
+            Some(ADMIN),
+            Some(json!({"log_enabled": true, "retention_days": 0})),
+        )
+        .await;
+        assert_eq!(c, StatusCode::BAD_REQUEST);
+        let (c, _, _) = call(
+            &app,
+            "PUT",
+            "/v1/admin/dns/settings",
+            Some(ADMIN),
+            Some(json!({"log_enabled": true, "retention_days": 7})),
+        )
+        .await;
+        assert_eq!(c, StatusCode::OK);
+
+        // a direct client, and a client behind a trusted proxy (X-Forwarded-For honoured only then)
+        assert_eq!(
+            doh_from(
+                &app,
+                &tok,
+                &dns_query("ads.example.com"),
+                "203.0.113.7:5000",
+                None
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            doh_from(
+                &app,
+                &tok,
+                &dns_query("example.org"),
+                "10.0.0.2:5000",
+                Some("198.51.100.9, 10.0.0.5")
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            doh_from(
+                &app,
+                &tok,
+                &dns_query("example.org"),
+                "203.0.113.7:5000",
+                Some("198.51.100.9")
+            )
+            .await,
+            StatusCode::OK,
+            "XFF from an untrusted peer is ignored"
+        );
+        let mut log = vec![];
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let (_, _, b) = call(&app, "GET", "/v1/admin/dns/query-log", Some(ADMIN), None).await;
+            log = serde_json::from_slice::<Vec<serde_json::Value>>(&b).unwrap();
+            if log.len() == 3 {
+                break;
+            }
+        }
+        assert_eq!(log.len(), 3, "{log:?}");
+        let raw = serde_json::to_string(&log).unwrap();
+        for ip in ["203.0.113.7", "198.51.100.9", "10.0.0.2"] {
+            assert!(!raw.contains(ip), "no raw IP in the log");
+        }
+        assert!(!raw.contains(&tok), "no token in the log");
+        let by = |q: &str| log.iter().filter(|e| e["qname"] == q).collect::<Vec<_>>();
+        assert_eq!(by("ads.example.com")[0]["action"], "block");
+        let clients: std::collections::HashSet<_> = log
+            .iter()
+            .map(|e| e["client"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            clients.len(),
+            2,
+            "two distinct clients (direct, and the forwarded one)"
+        );
+
+        // filters, stats
+        let (_, _, b) = call(
+            &app,
+            "GET",
+            "/v1/admin/dns/query-log?action=block",
+            Some(ADMIN),
+            None,
+        )
+        .await;
+        assert_eq!(
+            serde_json::from_slice::<Vec<serde_json::Value>>(&b)
+                .unwrap()
+                .len(),
+            1
+        );
+        let (_, _, b) = call(&app, "GET", "/v1/admin/dns/stats", Some(ADMIN), None).await;
+        let stats: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(
+            (stats["queries"].as_u64(), stats["blocked"].as_u64()),
+            (Some(3), Some(1))
+        );
+        assert_eq!(stats["top_blocked"][0]["key"], "ads.example.com");
+
+        // roles: a viewer cannot read the log nor change settings; an auditor can read
+        let (_, _, b) = call(
+            &app,
+            "POST",
+            "/v1/admin/api-tokens",
+            Some(ADMIN),
+            Some(json!({"name": "v", "role": "viewer"})),
+        )
+        .await;
+        let viewer = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (_, _, b) = call(
+            &app,
+            "POST",
+            "/v1/admin/api-tokens",
+            Some(ADMIN),
+            Some(json!({"name": "a", "role": "auditor"})),
+        )
+        .await;
+        let auditor = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            call(&app, "GET", "/v1/admin/dns/query-log", Some(&viewer), None)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&app, "GET", "/v1/admin/dns/query-log", Some(&auditor), None)
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(
+                &app,
+                "PUT",
+                "/v1/admin/dns/settings",
+                Some(&auditor),
+                Some(json!({"log_enabled": false, "retention_days": 1}))
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+
+        // erase, audited
+        let (c, _, b) = call(&app, "DELETE", "/v1/admin/dns/query-log", Some(ADMIN), None).await;
+        assert_eq!(c, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&b).unwrap()["deleted"],
+            3
+        );
+        let (_, _, a) = call(&app, "GET", "/v1/admin/audit", Some(ADMIN), None).await;
+        let a = String::from_utf8_lossy(&a);
+        assert!(a.contains("dns-settings.set") && a.contains("dns-log.clear"));
     }
 }

@@ -91,12 +91,15 @@ pub struct ApiConfig {
     /// Built admin UI (Next.js static export). Empty = `HYGEIA_WEB_DIR`, else
     /// `/usr/share/hygeia/web` if it exists, else no UI.
     pub web_dir: String,
+    /// Reverse proxies whose `X-Forwarded-For` is trusted for the client address (CIDRs).
+    pub trusted_proxies: Vec<String>,
 }
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
             listen: "127.0.0.1:8080".into(),
             web_dir: String::new(),
+            trusted_proxies: Vec::new(),
         }
     }
 }
