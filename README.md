@@ -42,6 +42,18 @@ flowchart TD
 | `hygeia-blocker` | Engine (signature check + rollback guard, URL/host verdicts, cosmetics, DNR plan) native + WASM; Chrome MV3 and Firefox MV3 extension in `extension/` (enrollment, bundle sync, DNR or webRequest blocking, element hiding, scriptlets); Chromium e2e-tested in a real browser, Firefox lint + fake-API tests only (not yet run in real Firefox). Missing: procedural selectors, more scriptlets, per-tenant fail-closed — see `extension/README.md` |
 | `web/` | Admin UI: Next.js 16 static export + Tailwind, served by the API (no Node at runtime): overview, rules + what-if simulation, devices + one-time enrollment tokens, filter-list status/licenses, audit + chain verification, groups / role bindings / API tokens, tenants. Token and OIDC (authorization code + PKCE) login. Real-browser e2e against the real server and a mock IdP. Missing: OIDC refresh (session ends with the ID token), OpenAPI-generated client, i18n |
 
+## Install as a service (Linux)
+
+```bash
+(cd web && npm ci && npm run build) && cargo build --release -p hygeia-proxy
+packaging/linux/build-deb.sh target/release/hygeia-proxy web/out dist
+sudo dpkg -i dist/hygeia-proxy_*.deb
+sudo systemctl enable --now hygeia-proxy
+sudo hygeia-proxy token        # credential for http://127.0.0.1:8470/login/
+```
+
+Config: `/etc/hygeia-proxy/hygeia-proxy.toml` (all keys optional; DNS stays off). State: `/var/lib/hygeia-proxy`. The unit runs as a dynamic user with a hardened sandbox. An RPM spec is in `packaging/linux/` (not yet built or tested).
+
 ## Standalone node
 
 `hygeia-proxy` is the installable local server (design: `docs/architecture/node.md`). Standalone mode needs no database, no OIDC and no network configuration:

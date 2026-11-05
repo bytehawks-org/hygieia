@@ -39,7 +39,19 @@ enum Cmd {
 fn paths(cli: &Cli) -> Result<(Paths, PathBuf), String> {
     let dir = real_env_data_dir(cli.data_dir.as_deref())?;
     let p = Paths::new(dir);
-    let cfg = cli.config.clone().unwrap_or_else(|| p.config.clone());
+    // Packaged service: root (and the unit) read /etc/hygeia-proxy/hygeia-proxy.toml when present.
+    let system_cfg = std::path::PathBuf::from("/etc/hygeia-proxy/hygeia-proxy.toml");
+    let cfg = cli.config.clone().unwrap_or_else(|| {
+        if cfg!(unix)
+            && std::env::var_os("HYGEIA_PROXY_DATA_DIR").is_none()
+            && system_cfg.exists()
+            && p.dir == std::path::Path::new("/var/lib/hygeia-proxy")
+        {
+            system_cfg.clone()
+        } else {
+            p.config.clone()
+        }
+    });
     Ok((p, cfg))
 }
 

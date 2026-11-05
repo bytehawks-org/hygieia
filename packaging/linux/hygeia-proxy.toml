@@ -1,0 +1,25 @@
+# Hygieia node configuration. Every key is optional; this file shows the defaults.
+# Restart the service after editing:  systemctl restart hygeia-proxy
+
+# "standalone": own rules, own lists, own signing key (default).
+# "connected":  endpoint of a central Hygieia server (see [upstream]).
+mode = "standalone"
+
+[http]
+# Admin UI, admin API and the browser-extension feed. Loopback only by default.
+listen = "127.0.0.1:8470"
+# Serving other machines is an explicit opt-in and needs the Host names clients will use:
+# allow_lan = true
+# allowed_hosts = ["pc.lan:8470"]
+
+[dns]
+# DNS is OFF by default: nothing listens on port 53 and the system resolver is not touched.
+# "local" filters DNS on this machine with the node's rules.
+mode = "off"
+# listen = "127.0.0.1:5353"
+# upstream = ["9.9.9.9:53"]
+# block_mode = "nxdomain"   # or "null_ip"
+
+# [upstream]            # only with mode = "connected"
+# url = "https://hygeia.example.com"
+# public_key = "<central signing public key, 64 hex>"

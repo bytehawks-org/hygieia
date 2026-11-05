@@ -96,3 +96,19 @@ jobs:
       - run: cargo build -p hygeia-proxy
       - run: cargo test -p hygeia-proxy -p hygeia-store --lib
       - run: cargo test -p hygeia-proxy --test node
+
+  package-linux:
+    runs-on: ubuntu-latest
+    needs: [test, web]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: cd web && npm ci && npm run build
+      - run: cargo build --release -p hygeia-proxy
+      - run: packaging/linux/build-deb.sh target/release/hygeia-proxy web/out dist
+      - run: dpkg -I dist/*.deb && dpkg -c dist/*.deb | head -20
+      - uses: actions/upload-artifact@v4
+        with: { name: hygeia-proxy-deb, path: dist/*.deb }
