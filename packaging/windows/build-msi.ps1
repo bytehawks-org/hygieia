@@ -13,6 +13,7 @@ if (-not (Get-Command wix -ErrorAction SilentlyContinue)) {
     $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
 }
 wix extension add --global WixToolset.UI.wixext/5.0.2
+if ($LASTEXITCODE -ne 0) { throw 'wix extension add failed' }
 
 # The UI needs an RTF licence page: wrap the repository LICENSE.
 $rtf = New-TemporaryFile
@@ -24,9 +25,10 @@ New-Item -ItemType Directory -Force (Split-Path $Out) | Out-Null
 $msiVersion = ($Version -replace '^v', '') -replace '[-+].*$', ''
 wix build packaging/windows/wix/hygeia.wxs -arch x64 -ext WixToolset.UI.wixext `
     -d Version=$msiVersion `
-    -d ExeDir=target/release `
-    -d TrayDir=crates/hygeia-tray/target/release `
-    -d WebDir=web/out `
+    -d ExeDir=$(Resolve-Path target/release) `
+    -d TrayDir=$(Resolve-Path crates/hygeia-tray/target/release) `
+    -d WebDir=$(Resolve-Path web/out) `
     -d LicenseRtf=$rtf `
     -o $Out
+if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
 Write-Host "Built $Out"

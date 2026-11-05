@@ -54,6 +54,10 @@ Items marked *unverified* have never run on a real target (see [Roadmap](docs/RO
 - GitHub Actions run **only on release tags** (or manually); `ci` is reusable and gates `release`. The day-to-day gate is `scripts/check-all.sh --all`.
 - UI types are derived from the generated OpenAPI schema instead of being hand-maintained.
 
+### Fixed
+- Release workflow: the `publish` job downloaded the UI build artefact together with the release assets and failed on `sha256sum`; it now downloads only `linux`, `windows` and `extensions`.
+- Windows MSI build (first run on GitHub): duplicate sequence entry, empty public properties ignored, relative source paths resolved under the install tree; `build-msi.ps1` now fails when `wix` fails instead of reporting success.
+
 ### Security
 - Credentials are stored as SHA-256 hashes and shown once; the DoH token path is redacted in access logs; client IPs are never logged by the query log.
 

@@ -109,9 +109,14 @@ jobs:
     needs: [ci, linux, windows, extensions]
     runs-on: ubuntu-latest
     steps:
+      # Only the release assets: the `web-out` artefact (UI build) is an input of other jobs, not an asset.
       - uses: actions/download-artifact@v4
-        with: { path: out, merge-multiple: true }
-      - run: ls -lh out && cd out && sha256sum * > SHA256SUMS
+        with: { name: linux, path: out }
+      - uses: actions/download-artifact@v4
+        with: { name: windows, path: out }
+      - uses: actions/download-artifact@v4
+        with: { name: extensions, path: out }
+      - run: ls -lh out && cd out && sha256sum $(find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort) > SHA256SUMS
       - name: Create or update the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
