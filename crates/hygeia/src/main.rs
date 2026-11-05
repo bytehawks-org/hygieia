@@ -63,6 +63,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (auth, public) = build_auth(&cfg, &store).await?;
     let mut state = AppState::new(store, signing_key, auth);
     state.public = public;
+    if let Ok(t) = std::env::var("HYGEIA_METRICS_TOKEN") {
+        if t.len() < 16 {
+            return Err("HYGEIA_METRICS_TOKEN must be at least 16 characters".into());
+        }
+        state.metrics_token = Some(t);
+        tracing::info!("metrics enabled at /metrics (bearer token required)");
+    }
     state.trusted_proxies = cfg
         .api
         .trusted_proxies

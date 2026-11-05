@@ -97,9 +97,45 @@ pub struct DnsService {
     log_tx: mpsc::Sender<(String, QueryLogEntry)>,
     log_rx: Mutex<Option<mpsc::Receiver<(String, QueryLogEntry)>>>,
     pub counters: Counters,
+    pub metrics: DnsMetrics,
 }
 
 impl DnsService {
+    /// Process-wide counters (also exported by the metrics endpoint).
+    pub fn render_counters(&self, out: &mut String) {
+        use std::fmt::Write;
+        let c = &self.counters;
+        for (name, help, v) in [
+            (
+                "hygeia_dns_auth_failures_total",
+                "Queries with an unknown, expired or revoked token.",
+                &c.auth_failures,
+            ),
+            (
+                "hygeia_dns_rate_limited_total",
+                "Queries refused by the rate limiter.",
+                &c.rate_limited,
+            ),
+            (
+                "hygeia_dns_upstream_servfail_total",
+                "SERVFAIL answers (upstream failure or no bundle).",
+                &c.servfail,
+            ),
+            (
+                "hygeia_dns_query_log_dropped_total",
+                "Query-log entries dropped because the writer queue was full.",
+                &c.log_dropped,
+            ),
+        ] {
+            let _ = writeln!(
+                out,
+                "# HELP {name} {help}\n# TYPE {name} counter\n{name} {}",
+                v.load(Ordering::Relaxed)
+            );
+        }
+        self.metrics.render(out);
+    }
+
     pub fn new(cfg: DnsServiceConfig) -> Self {
         let (log_tx, log_rx) = mpsc::channel(8192);
         Self {
@@ -111,6 +147,7 @@ impl DnsService {
             log_tx,
             log_rx: Mutex::new(Some(log_rx)),
             counters: Counters::default(),
+            metrics: DnsMetrics::default(),
         }
     }
 
@@ -312,6 +349,24 @@ impl DnsService {
         ctx: &QueryCtx<'_>,
         packet: &[u8],
     ) -> Result<Vec<u8>, DohError> {
+        let t0 = Instant::now();
+        let r = self.resolve_inner(st, ctx, packet).await;
+        self.metrics.observe(t0.elapsed());
+        match r {
+            Ok((reply, outcome)) => {
+                self.metrics.count(ctx.tenant, ctx.transport, outcome);
+                Ok(reply)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn resolve_inner(
+        &self,
+        st: &AppState,
+        ctx: &QueryCtx<'_>,
+        packet: &[u8],
+    ) -> Result<(Vec<u8>, &'static str), DohError> {
         self.counters.queries.fetch_add(1, Ordering::Relaxed);
         let settings = self.settings(st, ctx.tenant).await;
         let fail_open = settings.fail_open.unwrap_or(self.cfg.fail_open);
@@ -324,12 +379,12 @@ impl DnsService {
             match forward_udp(packet, self.cfg.upstream, self.cfg.upstream_timeout).await {
                 Ok(b) => {
                     self.counters.forwarded.fetch_add(1, Ordering::Relaxed);
-                    b
+                    (b, "allowed")
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "dns upstream failure");
                     self.counters.servfail.fetch_add(1, Ordering::Relaxed);
-                    servfail(packet)
+                    (servfail(packet), "servfail")
                 }
             }
         };
@@ -338,17 +393,17 @@ impl DnsService {
                 forward.await
             } else {
                 self.counters.servfail.fetch_add(1, Ordering::Relaxed);
-                servfail(packet)
+                (servfail(packet), "servfail")
             });
         };
         let (decision, logged) = decide(&rs, packet, mode);
-        let (reply, action) = match decision {
+        let (reply, outcome) = match decision {
             Decision::Answer(b) if b.is_empty() => return Err(DohError::BadRequest),
             Decision::Answer(b) => {
                 self.counters.blocked.fetch_add(1, Ordering::Relaxed);
-                (b, "block")
+                (b, "blocked")
             }
-            Decision::Forward => (forward.await, "allow"),
+            Decision::Forward => forward.await,
         };
         if settings.log_enabled
             && let Some((_, verdict)) = logged
@@ -365,7 +420,12 @@ impl DnsService {
                     .map_or_else(|| "-".to_string(), |ip| self.pseudonym(ctx.tenant, ip, ts)),
                 qname,
                 qtype,
-                action: action.to_string(),
+                action: if outcome == "blocked" {
+                    "block"
+                } else {
+                    "allow"
+                }
+                .to_string(),
                 reason: format!("{:?}", verdict.reason),
             };
             if self
@@ -376,7 +436,82 @@ impl DnsService {
                 self.counters.log_dropped.fetch_add(1, Ordering::Relaxed);
             }
         }
-        Ok(reply)
+        Ok((reply, outcome))
+    }
+}
+
+/// Latency histogram bucket bounds in seconds.
+const BUCKETS: [f64; 7] = [0.001, 0.005, 0.025, 0.1, 0.5, 2.0, 10.0];
+
+/// Labelled counters and a latency histogram for the Prometheus endpoint. Labels are bounded:
+/// tenant ids (as many as tenants), three transports, three outcomes.
+#[derive(Default)]
+pub struct DnsMetrics {
+    by_label: Mutex<HashMap<(String, &'static str, &'static str), u64>>,
+    hist: Mutex<([u64; 8], f64)>, // cumulative-ready bucket counts (last = +Inf), sum
+}
+
+impl DnsMetrics {
+    fn count(&self, tenant: &str, transport: &'static str, outcome: &'static str) {
+        *self
+            .by_label
+            .lock()
+            .unwrap()
+            .entry((tenant.to_string(), transport, outcome))
+            .or_insert(0) += 1;
+    }
+
+    fn observe(&self, d: Duration) {
+        let secs = d.as_secs_f64();
+        let mut h = self.hist.lock().unwrap();
+        let i = BUCKETS
+            .iter()
+            .position(|b| secs <= *b)
+            .unwrap_or(BUCKETS.len());
+        h.0[i] += 1;
+        h.1 += secs;
+    }
+
+    /// Prometheus text exposition fragment.
+    pub fn render(&self, out: &mut String) {
+        use std::fmt::Write;
+        let _ = writeln!(
+            out,
+            "# HELP hygeia_dns_queries_total DNS queries answered, by tenant, transport and outcome."
+        );
+        let _ = writeln!(out, "# TYPE hygeia_dns_queries_total counter");
+        let mut rows: Vec<_> = self
+            .by_label
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        rows.sort();
+        for ((t, tr, o), n) in rows {
+            let _ = writeln!(
+                out,
+                "hygeia_dns_queries_total{{tenant=\"{t}\",transport=\"{tr}\",outcome=\"{o}\"}} {n}"
+            );
+        }
+        let (counts, sum) = *self.hist.lock().unwrap();
+        let _ = writeln!(
+            out,
+            "# HELP hygeia_dns_resolve_seconds Time to resolve a query (excludes TLS/HTTP handling)."
+        );
+        let _ = writeln!(out, "# TYPE hygeia_dns_resolve_seconds histogram");
+        let mut cum = 0;
+        for (i, b) in BUCKETS.iter().enumerate() {
+            cum += counts[i];
+            let _ = writeln!(out, "hygeia_dns_resolve_seconds_bucket{{le=\"{b}\"}} {cum}");
+        }
+        cum += counts[BUCKETS.len()];
+        let _ = writeln!(
+            out,
+            "hygeia_dns_resolve_seconds_bucket{{le=\"+Inf\"}} {cum}"
+        );
+        let _ = writeln!(out, "hygeia_dns_resolve_seconds_sum {sum}");
+        let _ = writeln!(out, "hygeia_dns_resolve_seconds_count {cum}");
     }
 }
 

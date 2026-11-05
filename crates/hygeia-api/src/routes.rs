@@ -54,6 +54,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(readyz))
+        .route("/metrics", get(metrics))
         // data plane (device credentials)
         .route("/v1/pubkey", get(pubkey))
         .route("/v1/enroll", post(enroll))
@@ -217,6 +218,77 @@ macro_rules! gate {
 }
 
 // ---------------------------------------------------------------- data plane
+
+/// Prometheus text exposition. Disabled (404) unless a metrics token is configured; the scraper
+/// authenticates with `Authorization: Bearer <token>`.
+async fn metrics(State(st): S, headers: HeaderMap) -> Response {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    let Some(want) = &st.metrics_token else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let ok = bearer(&headers).is_some_and(|t| {
+        // compare digests: constant time with respect to the secret
+        Sha256::digest(t.as_bytes()) == Sha256::digest(want.as_bytes())
+    });
+    if !ok {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "# HELP hygeia_up 1 if the store answers.\n# TYPE hygeia_up gauge\nhygeia_up {}",
+        u8::from(st.store.ping().await.is_ok())
+    );
+    let _ = writeln!(
+        out,
+        "# HELP hygeia_build_info Build information.\n# TYPE hygeia_build_info gauge\nhygeia_build_info{{version=\"{}\"}} 1",
+        env!("CARGO_PKG_VERSION")
+    );
+    if let Some(arr) = st.list_status().as_array() {
+        let _ = writeln!(
+            out,
+            "# HELP hygeia_list_block_domains Block domains loaded per list source.\n# TYPE hygeia_list_block_domains gauge"
+        );
+        for l in arr {
+            let _ = writeln!(
+                out,
+                "hygeia_list_block_domains{{source=\"{}\"}} {}",
+                l["id"]
+                    .as_str()
+                    .unwrap_or("?")
+                    .replace(['"', '\\', '\n'], "_"),
+                l["block_domains"].as_u64().unwrap_or(0)
+            );
+        }
+        let _ = writeln!(
+            out,
+            "# HELP hygeia_list_last_ok_timestamp_seconds Unix time of the last successful download per list.\n# TYPE hygeia_list_last_ok_timestamp_seconds gauge"
+        );
+        for l in arr {
+            let _ = writeln!(
+                out,
+                "hygeia_list_last_ok_timestamp_seconds{{source=\"{}\"}} {}",
+                l["id"]
+                    .as_str()
+                    .unwrap_or("?")
+                    .replace(['"', '\\', '\n'], "_"),
+                l["last_ok"].as_i64().unwrap_or(0)
+            );
+        }
+    }
+    if let Some(d) = &st.dns {
+        d.render_counters(&mut out);
+    }
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        out,
+    )
+        .into_response()
+}
 
 /// Readiness for load balancers: the replica can reach its store. (`/healthz` is liveness only.)
 async fn readyz(State(st): S) -> Response {
@@ -2767,5 +2839,94 @@ mod tests {
         let (_, _, a) = call(&app, "GET", "/v1/admin/audit", Some(ADMIN), None).await;
         let a = String::from_utf8_lossy(&a);
         assert!(a.contains("dns-settings.set") && a.contains("dns-log.clear"));
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_is_off_by_default_authenticated_and_labelled() {
+        let (app, _) = app();
+        assert_eq!(
+            call(&app, "GET", "/metrics", None, None).await.0,
+            StatusCode::NOT_FOUND,
+            "disabled without a token"
+        );
+
+        let upstream = fake_upstream().await;
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        store.bootstrap_default().await.unwrap();
+        let mut state = AppState::new(
+            store,
+            SigningKey::from_bytes(&[1u8; 32]),
+            AuthConfig {
+                break_glass: Some(BreakGlass::new(ADMIN, None).unwrap()),
+                ..Default::default()
+            },
+        );
+        state.dns = Some(Arc::new(crate::doh::DnsService::new(
+            crate::doh::DnsServiceConfig::new(upstream),
+        )));
+        state.metrics_token = Some("scrape-token-0123456789".into());
+        let app = router(Arc::new(state));
+        assert_eq!(
+            call(&app, "GET", "/metrics", None, None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(&app, "GET", "/metrics", Some("wrong"), None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(&app, "GET", "/metrics", Some(ADMIN), None).await.0,
+            StatusCode::UNAUTHORIZED,
+            "an admin credential is not the scrape token"
+        );
+
+        let (_, _, b) = call(
+            &app,
+            "POST",
+            "/v1/admin/dns-tokens",
+            Some(ADMIN),
+            Some(json!({"name": "t"})),
+        )
+        .await;
+        let tok = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        call(
+            &app,
+            "POST",
+            "/v1/admin/rules",
+            Some(ADMIN),
+            Some(json!({"action": "block", "pattern": "ads.example.com"})),
+        )
+        .await;
+        doh(&app, &tok, &dns_query("ads.example.com")).await;
+        doh(&app, &tok, &dns_query("example.org")).await;
+        doh(&app, "hyg_dns_bad", &dns_query("example.org")).await;
+
+        let (c, h, b) = call(
+            &app,
+            "GET",
+            "/metrics",
+            Some("scrape-token-0123456789"),
+            None,
+        )
+        .await;
+        assert_eq!(c, StatusCode::OK);
+        assert!(
+            h["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/plain; version=0.0.4")
+        );
+        let t = String::from_utf8(b).unwrap();
+        assert!(t.contains("hygeia_up 1"));
+        assert!(t.contains("hygeia_build_info{version="));
+        assert!(t.contains(&format!("hygeia_dns_queries_total{{tenant=\"{DEFAULT_TENANT}\",transport=\"doh\",outcome=\"blocked\"}} 1")), "{t}");
+        assert!(t.contains(&format!("hygeia_dns_queries_total{{tenant=\"{DEFAULT_TENANT}\",transport=\"doh\",outcome=\"allowed\"}} 1")));
+        assert!(t.contains("hygeia_dns_auth_failures_total 1"));
+        assert!(t.contains("hygeia_dns_resolve_seconds_count 2"));
+        assert!(t.contains("hygeia_dns_resolve_seconds_bucket{le=\"+Inf\"} 2"));
+        assert!(!t.contains(&tok), "no credential in metrics");
     }
 }

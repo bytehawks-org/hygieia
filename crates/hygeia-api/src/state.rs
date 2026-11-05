@@ -31,6 +31,8 @@ pub struct AppState {
     /// Cloud DNS over HTTPS (`/dns-query/<token>`); `None` = disabled (404).
     pub dns: Option<Arc<crate::doh::DnsService>>,
     /// Reverse proxies whose `X-Forwarded-For` is believed (everyone else's is ignored).
+    /// Bearer token for `GET /metrics`; `None` = endpoint disabled (404).
+    pub metrics_token: Option<String>,
     pub trusted_proxies: Vec<hygeia_core::cidr::Cidr>,
     lists: RwLock<Vec<Arc<ParsedSource>>>,
     list_status: RwLock<Value>,
@@ -85,6 +87,7 @@ impl AppState {
             auth,
             public: Default::default(),
             dns: None,
+            metrics_token: None,
             trusted_proxies: Vec::new(),
             lists: RwLock::new(Vec::new()),
             list_status: RwLock::new(Value::Array(vec![])),
