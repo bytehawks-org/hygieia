@@ -74,6 +74,9 @@ struct Snapshot {
     users: Vec<User>,
     bindings: Vec<Binding>,
     api_tokens: Vec<Secret<ApiToken>>,
+    /// Added after format 1 shipped: absent in older files.
+    #[serde(default)]
+    dns_tokens: Vec<Secret<crate::DnsToken>>,
     policies: Vec<(String, ListPolicy)>,
     subs: Vec<(String, Subscription)>,
 }
@@ -120,6 +123,14 @@ impl MemoryStore {
             bindings: s.bindings.clone(),
             api_tokens: s
                 .api_tokens
+                .iter()
+                .map(|(t, h)| Secret {
+                    item: t.clone(),
+                    secret_hash: *h,
+                })
+                .collect(),
+            dns_tokens: s
+                .dns_tokens
                 .iter()
                 .map(|(t, h)| Secret {
                     item: t.clone(),
@@ -179,6 +190,11 @@ impl MemoryStore {
             s.bindings = snap.bindings;
             s.api_tokens = snap
                 .api_tokens
+                .into_iter()
+                .map(|x| (x.item, x.secret_hash))
+                .collect();
+            s.dns_tokens = snap
+                .dns_tokens
                 .into_iter()
                 .map(|x| (x.item, x.secret_hash))
                 .collect();
@@ -368,6 +384,36 @@ impl Store for FileStore {
         c: crate::StoredBundle,
     ) -> Result<crate::StoredBundle> {
         self.inner.store_compiled(t, g, c).await
+    }
+
+    async fn create_dns_token(
+        &self,
+        t: &str,
+        g: &str,
+        n: &str,
+        e: Option<i64>,
+    ) -> Result<(crate::DnsToken, String)> {
+        let r = self.inner.create_dns_token(t, g, n, e).await;
+        if r.is_ok() {
+            self.save();
+        }
+        r
+    }
+
+    async fn authenticate_dns_token(&self, s: &str, now: i64) -> Result<Option<crate::DnsToken>> {
+        self.inner.authenticate_dns_token(s, now).await
+    }
+
+    async fn revoke_dns_token(&self, t: &str, id: &str) -> Result<()> {
+        let r = self.inner.revoke_dns_token(t, id).await;
+        if r.is_ok() {
+            self.save();
+        }
+        r
+    }
+
+    async fn list_dns_tokens(&self, t: &str) -> Result<Vec<crate::DnsToken>> {
+        self.inner.list_dns_tokens(t).await
     }
 
     // Coordination state is ephemeral: not persisted.

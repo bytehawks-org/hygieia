@@ -7,7 +7,6 @@ use hygeia_audit::{Draft, Event, GENESIS};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::{Postgres, Row, Transaction};
 
-use crate::StoredBundle;
 use crate::rbac::Role;
 use crate::{
     ApiToken, AuditStatus, Binding, CatalogSource, DEFAULT_GROUP_ID, DEFAULT_TENANT_ID, Device,
@@ -15,6 +14,7 @@ use crate::{
     RuleAction, Selection, Store, StoreError, Subscription, Tenant, User, hash_secret, new_id,
     new_secret,
 };
+use crate::{DnsToken, PREFIX_DNS, StoredBundle};
 
 #[derive(Clone)]
 pub struct PgStore {
@@ -888,6 +888,103 @@ impl Store for PgStore {
                     expires_at: r.get(4),
                     revoked: r.get(5),
                 })
+            })
+            .collect())
+    }
+
+    async fn create_dns_token(
+        &self,
+        tenant_id: &str,
+        group_id: &str,
+        name: &str,
+        expires_at: Option<i64>,
+    ) -> Result<(DnsToken, String)> {
+        let (secret, hash) = new_secret(PREFIX_DNS);
+        let id = new_id();
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        // composite FK (tenant, group) rejects a group of another tenant
+        sqlx::query(
+            "insert into dns_tokens (id, tenant_id, group_id, name, secret_hash, expires_at)
+             values ($1::uuid, $2::uuid, $3::uuid, $4, $5, to_timestamp($6::float8))",
+        )
+        .bind(&id)
+        .bind(tenant_id)
+        .bind(group_id)
+        .bind(name)
+        .bind(&hash[..])
+        .bind(expires_at.map(|e| e as f64))
+        .execute(&mut *tx)
+        .await
+        .map_err(map_err)?;
+        tx.commit().await.map_err(map_err)?;
+        Ok((
+            DnsToken {
+                id,
+                tenant_id: tenant_id.into(),
+                group_id: group_id.into(),
+                name: name.into(),
+                expires_at,
+                revoked: false,
+            },
+            secret,
+        ))
+    }
+
+    async fn authenticate_dns_token(&self, secret: &str, now: i64) -> Result<Option<DnsToken>> {
+        if !secret.starts_with(PREFIX_DNS) {
+            return Ok(None);
+        }
+        let row = sqlx::query("select id::text, tenant_id::text, group_id::text, name, expires_at from hyg_auth_dns_token($1, to_timestamp($2::float8))")
+            .bind(&hash_secret(secret)[..])
+            .bind(now as f64)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_err)?;
+        Ok(row.map(|r| DnsToken {
+            id: r.get(0),
+            tenant_id: r.get(1),
+            group_id: r.get(2),
+            name: r.get(3),
+            expires_at: r.get(4),
+            revoked: false,
+        }))
+    }
+
+    async fn revoke_dns_token(&self, tenant_id: &str, id: &str) -> Result<()> {
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        let n = sqlx::query("update dns_tokens set revoked_at = now() where id = $1::uuid")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_err)?
+            .rows_affected();
+        tx.commit().await.map_err(map_err)?;
+        if n == 0 {
+            Err(StoreError::NotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn list_dns_tokens(&self, tenant_id: &str) -> Result<Vec<DnsToken>> {
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        let rows = sqlx::query(
+            "select id::text, tenant_id::text, group_id::text, name, extract(epoch from expires_at)::bigint, revoked_at is not null
+             from dns_tokens order by created_at",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_err)?;
+        tx.commit().await.map_err(map_err)?;
+        Ok(rows
+            .iter()
+            .map(|r| DnsToken {
+                id: r.get(0),
+                tenant_id: r.get(1),
+                group_id: r.get(2),
+                name: r.get(3),
+                expires_at: r.get(4),
+                revoked: r.get(5),
             })
             .collect())
     }

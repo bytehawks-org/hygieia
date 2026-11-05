@@ -343,6 +343,61 @@ pub async fn run_identity(st: &dyn Store) {
             .is_err(),
         "owner is platform-only"
     );
+
+    // DNS tokens: attribute a query to (tenant, group); revocable; group must belong to the tenant
+    let ga = st.create_group(&a.id, "dns-g").await.unwrap();
+    let (dt, dsecret) = st
+        .create_dns_token(&a.id, &ga.id, "laptop", Some(1000))
+        .await
+        .unwrap();
+    assert!(dsecret.starts_with("hyg_dns_"));
+    let got = st
+        .authenticate_dns_token(&dsecret, 500)
+        .await
+        .unwrap()
+        .expect("valid");
+    assert_eq!(
+        (got.tenant_id.as_str(), got.group_id.as_str()),
+        (a.id.as_str(), ga.id.as_str())
+    );
+    assert!(
+        st.authenticate_dns_token(&dsecret, 1000)
+            .await
+            .unwrap()
+            .is_none(),
+        "expired"
+    );
+    assert!(
+        st.authenticate_dns_token("hyg_dns_nope", 0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        st.authenticate_dns_token(&secret, 0)
+            .await
+            .unwrap()
+            .is_none(),
+        "an API token is not a DNS token"
+    );
+    assert!(
+        st.create_dns_token(&b.id, &ga.id, "x", None).await.is_err(),
+        "group of another tenant"
+    );
+    assert_eq!(st.list_dns_tokens(&a.id).await.unwrap().len(), 1);
+    assert!(
+        st.list_dns_tokens(&b.id).await.unwrap().is_empty(),
+        "tenant isolation"
+    );
+    assert!(st.revoke_dns_token(&b.id, &dt.id).await.is_err());
+    st.revoke_dns_token(&a.id, &dt.id).await.unwrap();
+    assert!(
+        st.authenticate_dns_token(&dsecret, 500)
+            .await
+            .unwrap()
+            .is_none(),
+        "revoked"
+    );
 }
 
 fn src(id: &str) -> CatalogSource {

@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 pub const PREFIX_ENROLL: &str = "hyg_enr_";
 pub const PREFIX_DEVICE: &str = "hyg_dev_";
 pub const PREFIX_API: &str = "hyg_api_";
+pub const PREFIX_DNS: &str = "hyg_dns_";
 
 /// 256 random bits with a scanner-friendly prefix. Returns `(secret, sha256)`.
 /// SHA-256 (not Argon2): input has full entropy, and a fast hash allows lookup by index.
@@ -196,6 +197,18 @@ pub trait Store: Send + Sync {
     async fn revoke_api_token(&self, tenant_id: &str, id: &str) -> Result<()>;
     async fn list_api_tokens(&self, tenant_id: &str) -> Result<Vec<ApiToken>>;
 
+    /// DNS access tokens (cloud DNS): attribute a query to (tenant, group). The secret is returned once.
+    async fn create_dns_token(
+        &self,
+        tenant_id: &str,
+        group_id: &str,
+        name: &str,
+        expires_at: Option<i64>,
+    ) -> Result<(DnsToken, String)>;
+    async fn authenticate_dns_token(&self, secret: &str, now: i64) -> Result<Option<DnsToken>>;
+    async fn revoke_dns_token(&self, tenant_id: &str, id: &str) -> Result<()>;
+    async fn list_dns_tokens(&self, tenant_id: &str) -> Result<Vec<DnsToken>>;
+
     /// Append to the tenant's hash chain.
     async fn append_audit(&self, draft: Draft) -> Result<()>;
     /// Last `limit` events of the tenant, oldest first.
@@ -303,6 +316,16 @@ pub struct ApiToken {
     pub revoked: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsToken {
+    pub id: String,
+    pub tenant_id: String,
+    pub group_id: String,
+    pub name: String,
+    pub expires_at: Option<i64>,
+    pub revoked: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RuleAction {
@@ -344,6 +367,7 @@ pub(crate) struct State {
     pub(crate) users: Vec<User>,
     pub(crate) bindings: Vec<Binding>,
     pub(crate) api_tokens: Vec<(ApiToken, [u8; 32])>,
+    pub(crate) dns_tokens: Vec<(DnsToken, [u8; 32])>,
     pub(crate) catalog: Vec<CatalogSource>,
     pub(crate) policies: HashMap<String, ListPolicy>,
     pub(crate) subs: Vec<(String, Subscription)>,
@@ -897,6 +921,69 @@ impl Store for MemoryStore {
             .lock()
             .unwrap()
             .api_tokens
+            .iter()
+            .filter(|(t, _)| t.tenant_id == tenant_id)
+            .map(|(t, _)| t.clone())
+            .collect())
+    }
+
+    async fn create_dns_token(
+        &self,
+        tenant_id: &str,
+        group_id: &str,
+        name: &str,
+        expires_at: Option<i64>,
+    ) -> Result<(DnsToken, String)> {
+        let mut s = self.s.lock().unwrap();
+        if !s
+            .groups
+            .iter()
+            .any(|g| g.id == group_id && g.tenant_id == tenant_id)
+        {
+            return Err(StoreError::NotFound);
+        }
+        let (secret, hash) = new_secret(PREFIX_DNS);
+        let t = DnsToken {
+            id: new_id(),
+            tenant_id: tenant_id.into(),
+            group_id: group_id.into(),
+            name: name.into(),
+            expires_at,
+            revoked: false,
+        };
+        s.dns_tokens.push((t.clone(), hash));
+        Ok((t, secret))
+    }
+
+    async fn authenticate_dns_token(&self, secret: &str, now: i64) -> Result<Option<DnsToken>> {
+        if !secret.starts_with(PREFIX_DNS) {
+            return Ok(None);
+        }
+        let h = hash_secret(secret);
+        let s = self.s.lock().unwrap();
+        Ok(s.dns_tokens
+            .iter()
+            .find(|(t, hash)| *hash == h && !t.revoked && t.expires_at.is_none_or(|e| e > now))
+            .map(|(t, _)| t.clone()))
+    }
+
+    async fn revoke_dns_token(&self, tenant_id: &str, id: &str) -> Result<()> {
+        let mut s = self.s.lock().unwrap();
+        let (t, _) = s
+            .dns_tokens
+            .iter_mut()
+            .find(|(t, _)| t.id == id && t.tenant_id == tenant_id)
+            .ok_or(StoreError::NotFound)?;
+        t.revoked = true;
+        Ok(())
+    }
+
+    async fn list_dns_tokens(&self, tenant_id: &str) -> Result<Vec<DnsToken>> {
+        Ok(self
+            .s
+            .lock()
+            .unwrap()
+            .dns_tokens
             .iter()
             .filter(|(t, _)| t.tenant_id == tenant_id)
             .map(|(t, _)| t.clone())
