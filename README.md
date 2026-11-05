@@ -22,6 +22,11 @@ flowchart TD
 - Lists are downloaded at runtime, never bundled in the code; each source carries license + attribution in bundle metadata. **Verify each list's license before enabling it.**
 - TLS MITM (proxy) is opt-in at two levels: cargo feature `mitm` and config flag. Default tier: DNS + extension.
 
+## Architecture and roadmap
+
+- `docs/architecture/node.md`: the installable **node** (`hygeia-proxy`): standalone local server for one PC, or endpoint/connector for a central multi-instance server (RBAC, configuration and audit stay central).
+- `docs/ROADMAP.md`: ordered work queue.
+
 ## Status
 
 | Crate | State |
