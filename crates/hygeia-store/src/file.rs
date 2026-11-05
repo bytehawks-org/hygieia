@@ -79,6 +79,8 @@ struct Snapshot {
     dns_tokens: Vec<Secret<crate::DnsToken>>,
     #[serde(default)]
     dns_settings: Vec<(String, crate::DnsSettings)>,
+    #[serde(default)]
+    dns_networks: Vec<crate::DnsNetwork>,
     policies: Vec<(String, ListPolicy)>,
     subs: Vec<(String, Subscription)>,
 }
@@ -139,6 +141,7 @@ impl MemoryStore {
                     secret_hash: *h,
                 })
                 .collect(),
+            dns_networks: s.dns_networks.clone(),
             dns_settings: s
                 .dns_settings
                 .iter()
@@ -205,6 +208,7 @@ impl MemoryStore {
                 .into_iter()
                 .map(|x| (x.item, x.secret_hash))
                 .collect();
+            s.dns_networks = snap.dns_networks;
             s.dns_settings = snap.dns_settings.into_iter().collect();
             s.policies = snap.policies.into_iter().collect();
             s.subs = snap.subs;
@@ -400,12 +404,47 @@ impl Store for FileStore {
         g: &str,
         n: &str,
         e: Option<i64>,
+        dot: bool,
     ) -> Result<(crate::DnsToken, String)> {
-        let r = self.inner.create_dns_token(t, g, n, e).await;
+        let r = self.inner.create_dns_token(t, g, n, e, dot).await;
         if r.is_ok() {
             self.save();
         }
         r
+    }
+
+    async fn authenticate_dot_label(&self, l: &str, now: i64) -> Result<Option<crate::DnsToken>> {
+        self.inner.authenticate_dot_label(l, now).await
+    }
+
+    async fn add_dns_network(
+        &self,
+        t: &str,
+        g: &str,
+        n: &str,
+        c: &str,
+    ) -> Result<crate::DnsNetwork> {
+        let r = self.inner.add_dns_network(t, g, n, c).await;
+        if r.is_ok() {
+            self.save();
+        }
+        r
+    }
+
+    async fn list_dns_networks(&self, t: &str) -> Result<Vec<crate::DnsNetwork>> {
+        self.inner.list_dns_networks(t).await
+    }
+
+    async fn delete_dns_network(&self, t: &str, id: &str) -> Result<()> {
+        let r = self.inner.delete_dns_network(t, id).await;
+        if r.is_ok() {
+            self.save();
+        }
+        r
+    }
+
+    async fn all_dns_networks(&self) -> Result<Vec<crate::DnsNetwork>> {
+        self.inner.all_dns_networks().await
     }
 
     async fn authenticate_dns_token(&self, s: &str, now: i64) -> Result<Option<crate::DnsToken>> {

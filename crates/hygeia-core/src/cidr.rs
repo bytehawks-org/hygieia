@@ -30,6 +30,46 @@ impl Cidr {
         self.prefix
     }
 
+    /// Can a tenant register this network as "my clients"? Guards against turning the service into
+    /// an open resolver: a private block may be registered as a whole (`10.0.0.0/8`), but anything
+    /// else must be small (IPv4 public: at least a /24; IPv6 public: at least a /48; IPv6 ULA a /32).
+    pub fn registrable(&self) -> Result<(), String> {
+        const V4_PRIVATE: [(&str, u8); 6] = [
+            ("10.0.0.0", 8),
+            ("172.16.0.0", 12),
+            ("192.168.0.0", 16),
+            ("100.64.0.0", 10),
+            ("169.254.0.0", 16),
+            ("127.0.0.0", 8),
+        ];
+        let min = match self.ip {
+            IpAddr::V4(_) => V4_PRIVATE
+                .iter()
+                .find(|(a, p)| {
+                    Cidr::new(a.parse().unwrap(), *p)
+                        .is_ok_and(|b| b.contains(self.ip) && self.prefix >= *p)
+                })
+                .map_or(24, |(_, p)| *p),
+            IpAddr::V6(_) => {
+                let ula = Cidr::new("fc00::".parse().unwrap(), 7).unwrap();
+                let ll = Cidr::new("fe80::".parse().unwrap(), 10).unwrap();
+                if self.prefix >= 7 && ula.contains(self.ip) {
+                    32
+                } else if self.prefix >= 10 && ll.contains(self.ip) {
+                    64
+                } else {
+                    48
+                }
+            }
+        };
+        if self.prefix < min {
+            return Err(format!(
+                "{self} is too broad to register: use /{min} or longer"
+            ));
+        }
+        Ok(())
+    }
+
     pub fn contains(&self, other: IpAddr) -> bool {
         // An IPv4-mapped IPv6 peer (::ffff:a.b.c.d) is matched as IPv4.
         let other = match other {
@@ -114,6 +154,37 @@ mod tests {
             c("192.168.0.0/16").contains(ip("::ffff:192.168.1.1")),
             "v4-mapped peers match v4 networks"
         );
+    }
+
+    #[test]
+    fn registrable_blocks_open_resolver_footguns() {
+        for ok in [
+            "10.0.0.0/8",
+            "192.168.1.0/24",
+            "172.16.0.0/12",
+            "203.0.113.0/24",
+            "203.0.113.7/32",
+            "2001:db8:1::/48",
+            "2001:db8:1:2::/64",
+            "fd00::/32",
+            "fd12:3456::/48",
+        ] {
+            assert!(c(ok).registrable().is_ok(), "{ok}");
+        }
+        for bad in [
+            "0.0.0.0/0",
+            "8.0.0.0/8",
+            "203.0.0.0/16",
+            "172.0.0.0/8",
+            "11.0.0.0/8",
+            "::/0",
+            "2001:db8::/32",
+            "fc00::/16",
+            "fe80::/10",
+        ] {
+            assert!(c(bad).registrable().is_err(), "{bad}");
+        }
+        assert!(c("fe80::/64").registrable().is_ok());
     }
 
     #[test]

@@ -220,7 +220,23 @@ pub trait Store: Send + Sync {
         group_id: &str,
         name: &str,
         expires_at: Option<i64>,
+        dot: bool,
     ) -> Result<(DnsToken, String)>;
+    /// DoT/DoQ attribution by SNI label (an identifier, not a secret: see migration 0008).
+    async fn authenticate_dot_label(&self, label: &str, now: i64) -> Result<Option<DnsToken>>;
+    /// Register a client network for plain DNS. The CIDR must be registrable (see `Cidr::registrable`)
+    /// and unique across tenants (`Conflict`).
+    async fn add_dns_network(
+        &self,
+        tenant_id: &str,
+        group_id: &str,
+        name: &str,
+        cidr: &str,
+    ) -> Result<DnsNetwork>;
+    async fn list_dns_networks(&self, tenant_id: &str) -> Result<Vec<DnsNetwork>>;
+    async fn delete_dns_network(&self, tenant_id: &str, id: &str) -> Result<()>;
+    /// Every registered network of every tenant (pre-tenant data-plane lookup, cached by callers).
+    async fn all_dns_networks(&self) -> Result<Vec<DnsNetwork>>;
     async fn authenticate_dns_token(&self, secret: &str, now: i64) -> Result<Option<DnsToken>>;
     async fn revoke_dns_token(&self, tenant_id: &str, id: &str) -> Result<()>;
     async fn list_dns_tokens(&self, tenant_id: &str) -> Result<Vec<DnsToken>>;
@@ -377,6 +393,18 @@ pub struct DnsToken {
     pub name: String,
     pub expires_at: Option<i64>,
     pub revoked: bool,
+    /// SNI label for DoT/DoQ, if the token was created with one.
+    #[serde(default)]
+    pub dot_label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsNetwork {
+    pub id: String,
+    pub tenant_id: String,
+    pub group_id: String,
+    pub name: String,
+    pub cidr: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -423,6 +451,7 @@ pub(crate) struct State {
     pub(crate) bindings: Vec<Binding>,
     pub(crate) api_tokens: Vec<(ApiToken, [u8; 32])>,
     pub(crate) dns_tokens: Vec<(DnsToken, [u8; 32])>,
+    pub(crate) dns_networks: Vec<DnsNetwork>,
     pub(crate) catalog: Vec<CatalogSource>,
     pub(crate) policies: HashMap<String, ListPolicy>,
     pub(crate) subs: Vec<(String, Subscription)>,
@@ -1064,6 +1093,7 @@ impl Store for MemoryStore {
         group_id: &str,
         name: &str,
         expires_at: Option<i64>,
+        dot: bool,
     ) -> Result<(DnsToken, String)> {
         let mut s = self.s.lock().unwrap();
         if !s
@@ -1081,9 +1111,85 @@ impl Store for MemoryStore {
             name: name.into(),
             expires_at,
             revoked: false,
+            dot_label: dot.then(|| {
+                crate::new_secret("").0[..22]
+                    .to_ascii_lowercase()
+                    .replace(['_', '-'], "x")
+            }),
         };
         s.dns_tokens.push((t.clone(), hash));
         Ok((t, secret))
+    }
+
+    async fn authenticate_dot_label(&self, label: &str, now: i64) -> Result<Option<DnsToken>> {
+        let s = self.s.lock().unwrap();
+        Ok(s.dns_tokens
+            .iter()
+            .find(|(t, _)| {
+                t.dot_label.as_deref() == Some(label)
+                    && !t.revoked
+                    && t.expires_at.is_none_or(|e| e > now)
+            })
+            .map(|(t, _)| t.clone()))
+    }
+
+    async fn add_dns_network(
+        &self,
+        tenant_id: &str,
+        group_id: &str,
+        name: &str,
+        cidr: &str,
+    ) -> Result<DnsNetwork> {
+        let c: hygeia_core::cidr::Cidr = cidr.parse().map_err(|_| StoreError::NotFound)?;
+        c.registrable().map_err(|_| StoreError::NotFound)?;
+        let mut s = self.s.lock().unwrap();
+        if !s
+            .groups
+            .iter()
+            .any(|g| g.id == group_id && g.tenant_id == tenant_id)
+        {
+            return Err(StoreError::NotFound);
+        }
+        let canonical = c.to_string();
+        if s.dns_networks.iter().any(|n| n.cidr == canonical) {
+            return Err(StoreError::Conflict);
+        }
+        let n = DnsNetwork {
+            id: new_id(),
+            tenant_id: tenant_id.into(),
+            group_id: group_id.into(),
+            name: name.into(),
+            cidr: canonical,
+        };
+        s.dns_networks.push(n.clone());
+        Ok(n)
+    }
+
+    async fn list_dns_networks(&self, tenant_id: &str) -> Result<Vec<DnsNetwork>> {
+        Ok(self
+            .s
+            .lock()
+            .unwrap()
+            .dns_networks
+            .iter()
+            .filter(|n| n.tenant_id == tenant_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn delete_dns_network(&self, tenant_id: &str, id: &str) -> Result<()> {
+        let mut s = self.s.lock().unwrap();
+        let before = s.dns_networks.len();
+        s.dns_networks
+            .retain(|n| !(n.id == id && n.tenant_id == tenant_id));
+        if s.dns_networks.len() == before {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    async fn all_dns_networks(&self) -> Result<Vec<DnsNetwork>> {
+        Ok(self.s.lock().unwrap().dns_networks.clone())
     }
 
     async fn authenticate_dns_token(&self, secret: &str, now: i64) -> Result<Option<DnsToken>> {

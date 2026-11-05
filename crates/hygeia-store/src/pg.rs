@@ -14,7 +14,7 @@ use crate::{
     RuleAction, Selection, Store, StoreError, Subscription, Tenant, User, hash_secret, new_id,
     new_secret,
 };
-use crate::{DnsSettings, DnsToken, PREFIX_DNS, QueryLogEntry, StoredBundle};
+use crate::{DnsNetwork, DnsSettings, DnsToken, PREFIX_DNS, QueryLogEntry, StoredBundle};
 
 #[derive(Clone)]
 pub struct PgStore {
@@ -70,6 +70,16 @@ impl PgStore {
             .await
             .map_err(map_err)?;
         Ok(tx)
+    }
+}
+
+fn net_row(r: &sqlx::postgres::PgRow) -> DnsNetwork {
+    DnsNetwork {
+        id: r.get(0),
+        tenant_id: r.get(1),
+        group_id: r.get(2),
+        name: r.get(3),
+        cidr: r.get(4),
     }
 }
 
@@ -1015,14 +1025,20 @@ impl Store for PgStore {
         group_id: &str,
         name: &str,
         expires_at: Option<i64>,
+        dot: bool,
     ) -> Result<(DnsToken, String)> {
         let (secret, hash) = new_secret(PREFIX_DNS);
+        let dot_label: Option<String> = dot.then(|| {
+            new_secret("").0[..22]
+                .to_ascii_lowercase()
+                .replace(['_', '-'], "x")
+        });
         let id = new_id();
         let mut tx = self.tenant_tx(tenant_id).await?;
         // composite FK (tenant, group) rejects a group of another tenant
         sqlx::query(
-            "insert into dns_tokens (id, tenant_id, group_id, name, secret_hash, expires_at)
-             values ($1::uuid, $2::uuid, $3::uuid, $4, $5, to_timestamp($6::float8))",
+            "insert into dns_tokens (id, tenant_id, group_id, name, secret_hash, expires_at, dot_label)
+             values ($1::uuid, $2::uuid, $3::uuid, $4, $5, to_timestamp($6::float8), $7)",
         )
         .bind(&id)
         .bind(tenant_id)
@@ -1030,6 +1046,7 @@ impl Store for PgStore {
         .bind(name)
         .bind(&hash[..])
         .bind(expires_at.map(|e| e as f64))
+        .bind(&dot_label)
         .execute(&mut *tx)
         .await
         .map_err(map_err)?;
@@ -1042,6 +1059,7 @@ impl Store for PgStore {
                 name: name.into(),
                 expires_at,
                 revoked: false,
+                dot_label,
             },
             secret,
         ))
@@ -1064,7 +1082,96 @@ impl Store for PgStore {
             name: r.get(3),
             expires_at: r.get(4),
             revoked: false,
+            dot_label: None,
         }))
+    }
+
+    async fn authenticate_dot_label(&self, label: &str, now: i64) -> Result<Option<DnsToken>> {
+        let row = sqlx::query("select id::text, tenant_id::text, group_id::text, name, expires_at, dot_label from hyg_auth_dot_label($1, to_timestamp($2::float8))")
+            .bind(label)
+            .bind(now as f64)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_err)?;
+        Ok(row.map(|r| DnsToken {
+            id: r.get(0),
+            tenant_id: r.get(1),
+            group_id: r.get(2),
+            name: r.get(3),
+            expires_at: r.get(4),
+            revoked: false,
+            dot_label: r.get(5),
+        }))
+    }
+
+    async fn add_dns_network(
+        &self,
+        tenant_id: &str,
+        group_id: &str,
+        name: &str,
+        cidr: &str,
+    ) -> Result<DnsNetwork> {
+        let c: hygeia_core::cidr::Cidr = cidr.parse().map_err(|_| StoreError::NotFound)?;
+        c.registrable().map_err(|_| StoreError::NotFound)?;
+        let canonical = c.to_string();
+        let id = new_id();
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        // UNIQUE(cidr) across tenants -> Conflict; composite FK rejects a foreign group
+        sqlx::query(
+            "insert into dns_networks (id, tenant_id, group_id, name, cidr) values ($1::uuid, $2::uuid, $3::uuid, $4, $5)",
+        )
+        .bind(&id)
+        .bind(tenant_id)
+        .bind(group_id)
+        .bind(name)
+        .bind(&canonical)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_err)?;
+        tx.commit().await.map_err(map_err)?;
+        Ok(DnsNetwork {
+            id,
+            tenant_id: tenant_id.into(),
+            group_id: group_id.into(),
+            name: name.into(),
+            cidr: canonical,
+        })
+    }
+
+    async fn list_dns_networks(&self, tenant_id: &str) -> Result<Vec<DnsNetwork>> {
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        let rows = sqlx::query("select id::text, tenant_id::text, group_id::text, name, cidr from dns_networks order by created_at")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(map_err)?;
+        tx.commit().await.map_err(map_err)?;
+        Ok(rows.iter().map(net_row).collect())
+    }
+
+    async fn delete_dns_network(&self, tenant_id: &str, id: &str) -> Result<()> {
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        let n = sqlx::query("delete from dns_networks where id = $1::uuid")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_err)?
+            .rows_affected();
+        tx.commit().await.map_err(map_err)?;
+        if n == 0 {
+            Err(StoreError::NotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn all_dns_networks(&self) -> Result<Vec<DnsNetwork>> {
+        let rows = sqlx::query(
+            "select id::text, tenant_id::text, group_id::text, name, cidr from hyg_dns_networks()",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(rows.iter().map(net_row).collect())
     }
 
     async fn revoke_dns_token(&self, tenant_id: &str, id: &str) -> Result<()> {
@@ -1086,7 +1193,7 @@ impl Store for PgStore {
     async fn list_dns_tokens(&self, tenant_id: &str) -> Result<Vec<DnsToken>> {
         let mut tx = self.tenant_tx(tenant_id).await?;
         let rows = sqlx::query(
-            "select id::text, tenant_id::text, group_id::text, name, extract(epoch from expires_at)::bigint, revoked_at is not null
+            "select id::text, tenant_id::text, group_id::text, name, extract(epoch from expires_at)::bigint, revoked_at is not null, dot_label
              from dns_tokens order by created_at",
         )
         .fetch_all(&mut *tx)
@@ -1102,6 +1209,7 @@ impl Store for PgStore {
                 name: r.get(3),
                 expires_at: r.get(4),
                 revoked: r.get(5),
+                dot_label: r.get(6),
             })
             .collect())
     }

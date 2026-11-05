@@ -639,6 +639,9 @@ struct NewDnsToken {
     group_id: String,
     name: String,
     ttl_secs: Option<i64>,
+    /// Also give the token a DoT/DoQ endpoint label (SNI identifier; visible on the wire).
+    #[serde(default)]
+    dot: bool,
 }
 
 async fn create_dns_token(State(st): S, h: HeaderMap, Json(r): Json<NewDnsToken>) -> Response {
@@ -655,7 +658,7 @@ async fn create_dns_token(State(st): S, h: HeaderMap, Json(r): Json<NewDnsToken>
     let expires = r.ttl_secs.map(|t| now().saturating_add(t));
     let (t, secret) = ok_or!(
         st.store
-            .create_dns_token(&tenant, &r.group_id, &r.name, expires)
+            .create_dns_token(&tenant, &r.group_id, &r.name, expires, r.dot)
             .await
     );
     // The secret is a credential (it is the DoH path): NOT in the audit diff.
@@ -670,7 +673,7 @@ async fn create_dns_token(State(st): S, h: HeaderMap, Json(r): Json<NewDnsToken>
     (
         StatusCode::CREATED,
         Json(json!({
-            "id": t.id, "token": secret, "group_id": t.group_id,
+            "id": t.id, "token": secret, "group_id": t.group_id, "dot_label": t.dot_label,
             "expires_at": t.expires_at, "doh_path": format!("/dns-query/{secret}"),
         })),
     )

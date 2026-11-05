@@ -465,7 +465,7 @@ pub async fn run_identity(st: &dyn Store) {
     // DNS tokens: attribute a query to (tenant, group); revocable; group must belong to the tenant
     let ga = st.create_group(&a.id, "dns-g").await.unwrap();
     let (dt, dsecret) = st
-        .create_dns_token(&a.id, &ga.id, "laptop", Some(1000))
+        .create_dns_token(&a.id, &ga.id, "laptop", Some(1000), true)
         .await
         .unwrap();
     assert!(dsecret.starts_with("hyg_dns_"));
@@ -477,6 +477,27 @@ pub async fn run_identity(st: &dyn Store) {
     assert_eq!(
         (got.tenant_id.as_str(), got.group_id.as_str()),
         (a.id.as_str(), ga.id.as_str())
+    );
+    let label = dt.dot_label.clone().expect("created with a DoT label");
+    assert_eq!(
+        st.authenticate_dot_label(&label, 500)
+            .await
+            .unwrap()
+            .map(|t| t.id),
+        Some(dt.id.clone())
+    );
+    assert!(
+        st.authenticate_dot_label(&label, 1000)
+            .await
+            .unwrap()
+            .is_none(),
+        "label of an expired token"
+    );
+    assert!(
+        st.authenticate_dot_label("nope", 0)
+            .await
+            .unwrap()
+            .is_none()
     );
     assert!(
         st.authenticate_dns_token(&dsecret, 1000)
@@ -499,7 +520,9 @@ pub async fn run_identity(st: &dyn Store) {
         "an API token is not a DNS token"
     );
     assert!(
-        st.create_dns_token(&b.id, &ga.id, "x", None).await.is_err(),
+        st.create_dns_token(&b.id, &ga.id, "x", None, false)
+            .await
+            .is_err(),
         "group of another tenant"
     );
     assert_eq!(st.list_dns_tokens(&a.id).await.unwrap().len(), 1);
@@ -516,6 +539,70 @@ pub async fn run_identity(st: &dyn Store) {
             .is_none(),
         "revoked"
     );
+    assert!(
+        st.authenticate_dot_label(&label, 500)
+            .await
+            .unwrap()
+            .is_none(),
+        "revoked label"
+    );
+    let (plain, _) = st
+        .create_dns_token(&a.id, &ga.id, "no-dot", None, false)
+        .await
+        .unwrap();
+    assert!(plain.dot_label.is_none());
+
+    // registered client networks: unique across tenants, scoped listing, registrable only
+    let gbb = st.create_group(&b.id, "dns-gb").await.unwrap();
+    let n1 = st
+        .add_dns_network(&a.id, &ga.id, "office", "192.168.50.0/24")
+        .await
+        .unwrap();
+    assert_eq!(n1.cidr, "192.168.50.0/24");
+    assert_eq!(
+        st.add_dns_network(&a.id, &ga.id, "norm", "192.168.60.9/24")
+            .await
+            .unwrap()
+            .cidr,
+        "192.168.60.0/24",
+        "stored canonical"
+    );
+    assert_eq!(
+        st.add_dns_network(&b.id, &gbb.id, "dup", "192.168.50.0/24")
+            .await,
+        Err(StoreError::Conflict),
+        "one tenant per network"
+    );
+    assert!(
+        st.add_dns_network(&a.id, &ga.id, "open", "0.0.0.0/0")
+            .await
+            .is_err(),
+        "too broad"
+    );
+    assert!(
+        st.add_dns_network(&a.id, &ga.id, "bad", "not-a-cidr")
+            .await
+            .is_err()
+    );
+    assert!(
+        st.add_dns_network(&b.id, &ga.id, "foreign", "192.168.70.0/24")
+            .await
+            .is_err(),
+        "group of another tenant"
+    );
+    assert_eq!(st.list_dns_networks(&a.id).await.unwrap().len(), 2);
+    assert!(
+        st.list_dns_networks(&b.id).await.unwrap().is_empty(),
+        "tenant isolation"
+    );
+    assert_eq!(
+        st.all_dns_networks().await.unwrap().len(),
+        2,
+        "the data-plane view spans tenants"
+    );
+    assert!(st.delete_dns_network(&b.id, &n1.id).await.is_err());
+    st.delete_dns_network(&a.id, &n1.id).await.unwrap();
+    assert_eq!(st.all_dns_networks().await.unwrap().len(), 1);
 }
 
 fn src(id: &str) -> CatalogSource {
