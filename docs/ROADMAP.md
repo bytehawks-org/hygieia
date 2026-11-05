@@ -1,34 +1,43 @@
-# Roadmap (work queue)
+# Roadmap
 
-Order matters: items 1–4 were requested ahead of the previously suggested steps. Status: `todo` unless noted.
+What is **left to do**, in priority order. What exists is in the [Changelog](../CHANGELOG.md).
+Status of every item: `todo` unless stated.
 
-## Queue
+## Delivered
 
-| # | Item | Why / outcome | Depends on |
-|---|---|---|---|
-| 1 | **Node core** (standalone mode implemented; Windows unverified) (`hygeia-proxy` as installable node, standalone mode) | One binary: bundle feed for the extension + embedded control plane with a file-backed store + local UI; **DNS off by default, opt-in** (local filtering or forward to the cloud service); runs in the foreground on Linux and Windows (cross-compiled) | design: `docs/architecture/node.md` |
-| 2 | **Connected mode** (relay, pinned key, disk cache, offline: done; local DNS, audit/telemetry forwarding: todo) | Node relays browser enrolments, fetches/verifies/caches central bundles on disk, keeps enforcing during outages | 1, central node endpoints (`/v1/node/*`) |
-| 3 | **Central redundancy** (shared compiled bundles, `/readyz`, SIGTERM drain: done; coordinated list refresh: done) | Several server instances behind a load balancer: bundles compiled once and persisted in PostgreSQL (stable ETag/version), coordinated list refresh, health/readiness, graceful shutdown | PostgreSQL store |
-| 4 | **Packaging, service and graphical mode** (Linux .deb + systemd: done; Windows service + zip/ps1: written, unverified; tray: written, unverified; MSI + setup wizard: written (`hygeia-proxy setup` tested on Linux, WiX package unbuilt/unrun), pause-blocking API: todo) | systemd unit + `.deb`/`.rpm`, Windows service + MSI, tray icon, local UI first-run wizard; OS-resolver integration only as an explicit opt-in step, with safe revert; `windows-latest` CI job | 1 (2 for connected wizard) |
-| 5 | **Cloud DNS service** (SaaS, multi-tenant: done in full — DoH, DoT, DoQ, plain DNS by registered network, upstream failover, per-tenant policy, rate limits, query log, metrics, native TLS; remaining: DNSSEC, HTTP/3, per-source connection limits, node-side *cloud forward*) | Filtering DNS facing the Internet: DoH token path, DoT SNI, registered CIDRs; never an open resolver; rate limiting; DoT/DoH upstream; query log with IP pseudonymisation and retention; metrics. Also the target of the node's *cloud forward* option. Constraints: `docs/architecture/dns-service.md` | 3 (replicas) |
-| 6 | **OpenAPI + generated client** (done) | hand-curated OpenAPI 3.1 (`docs/reference/openapi.json`, served at `/v1/openapi.json`), drift tests, generated TypeScript types and typed client | — |
+Core engine and signed bundles · audit chain · PostgreSQL store with RLS · filter lists · browser extension (Chrome, Firefox build) · OIDC/API-token/break-glass auth with RBAC · admin UI · standalone and connected node · central redundancy · packaging (Linux `.deb`/systemd; Windows service, tray, zip, MSI + setup wizard) · cloud DNS (DoH, DoT, DoQ, plain by network, failover, limits, query log, metrics, native TLS) · OpenAPI 3.1 and generated TypeScript client · tag-only CI.
 
-## Done
+## 1. Verify what has never run (next)
 
-Documentation (`docs/`), README with status badges, behaviour smoke scenarios (`scripts/`), CodeQL / audit / coverage / release workflows, scale report test.
+| Item | How |
+|---|---|
+| All workflows on GitHub (`ci` via `release`, `codeql`, `audit`, `coverage`, `extension-e2e`, `windows`) | push a tag such as `v0.1.0-rc1`; fix what fails; promote advisory jobs to required |
+| Windows: MSI, wizard, service, tray | install the MSI from the draft release on Windows 11; unattended `msiexec /qn` too |
+| Firefox | manual pass: enrol, ads page, console |
+| systemd on a live host, RPM build | `systemctl enable --now`; `rpmbuild` on Fedora |
+| PostgreSQL suites in CI | already wired in `ci`; confirm on the first tag |
 
-Cloud DNS (item 5): tokens, DoH/DoT/DoQ/plain DNS front-ends, registered networks, upstream pool with failover, per-tenant settings, pseudonymised query log with retention, Prometheus metrics, per-source rate limits, native HTTPS with reloadable certificates.
+## 2. Cloud DNS hardening
 
-Central redundancy, core (item 3): `compiled_bundles` table, content-addressed bundles shared across replicas, readiness probe, graceful SIGTERM, lease-based coordinated list refresh with lists shared through the store.
+- Load test (throughput, latency under load, memory) and interoperability run with real DoT/DoQ/DoH clients and public resolvers.
+- Per-source connection limits (today only global caps); active upstream health probes.
+- DNSSEC validation; HTTP/3 for DoH.
+- Log shipping (syslog/OTLP) and an external anchor for the audit chain head.
 
-Connected mode, relay part (item 2): `mode = "connected"`, pinned central key, device-credential relay, rollback guard, on-disk cache, offline serving, revocation passthrough.
+## 3. Node
 
-Node core, standalone mode (item 1): file store, stable keys, local owner credential, host/origin guard, opt-in DNS, CLI, e2e with the extension and the UI on Linux.
+- Cloud forward: send the node's DNS to the tenant's cloud endpoint.
+- Local DNS in connected mode; audit and telemetry forwarding to the central server.
+- Pause-blocking API (so the tray can offer it); OS-resolver integration only as an explicit opt-in step with safe revert.
 
-Core engine and signed bundles · audit hash chain · PostgreSQL store with RLS · list catalogue, downloader and cosmetic/scriptlet parsing · blocker engine, Chrome and Firefox extensions · OIDC/API-token/break-glass authentication with RBAC · admin UI · per-tenant list selection.
+## 4. Product
 
-## Known gaps carried forward
+- OIDC refresh in the UI; UI for cloud DNS (tokens, networks, query log, stats).
+- Extension: more scriptlets, procedural cosmetic selectors, earlier script injection; Chrome DNR budget measurements.
+- Per-tenant fail-closed policy for the extension.
 
-- Built-in DNS serves only the default tenant, UDP only, plain-UDP upstream (items 1, 5).
-- Firefox build not yet run in a real Firefox; Windows nothing yet run on Windows (item 4).
-- Scriptlet timing in Chrome MV3 is best-effort for the first HTML chunk.
+## 5. Delivery and operations
+
+- Sign release artefacts (MSI Authenticode, checksums/signatures for `.deb` and zips); publish to winget/apt.
+- Container image and Helm chart for the server; example reverse-proxy configs.
+- Independent security review; SBOM generation in the release workflow.
