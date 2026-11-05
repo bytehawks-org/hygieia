@@ -161,6 +161,14 @@ pub struct CloudDnsSection {
     pub burst: f64,
     /// When no bundle is available answer anyway instead of SERVFAIL.
     pub fail_open: bool,
+    /// Plain DNS for registered networks (`ip:port`, empty = off). Never answers strangers (REFUSED).
+    pub udp_listen: String,
+    pub tcp_listen: String,
+    /// DNS over TLS (needs `[tls]`). SNI `<label>.<dot_domain>` selects a token created with `dot`.
+    pub dot_listen: String,
+    pub dot_domain: String,
+    /// DNS over QUIC (RFC 9250, UDP; needs `[tls]`), same attribution as DoT.
+    pub doq_listen: String,
     /// Per source address, across transports.
     pub ip_rate_per_sec: f64,
     pub ip_burst: f64,
@@ -175,6 +183,11 @@ impl Default for CloudDnsSection {
             rate_per_sec: 50.0,
             burst: 100.0,
             fail_open: false,
+            udp_listen: String::new(),
+            tcp_listen: String::new(),
+            dot_listen: String::new(),
+            dot_domain: String::new(),
+            doq_listen: String::new(),
             ip_rate_per_sec: 100.0,
             ip_burst: 200.0,
         }

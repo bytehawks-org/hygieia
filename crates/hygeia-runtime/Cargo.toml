@@ -18,7 +18,10 @@ serde_json.workspace = true
 serde.workspace = true
 getrandom = "0.3"
 sha2.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
 
 [dev-dependencies]
+rcgen = "0.14"
 async-trait = "0.1"
 hygeia-store.workspace = true

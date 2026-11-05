@@ -130,6 +130,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(state);
     if cfg.cloud_dns.enabled {
         hygeia_runtime::spawn_query_log_purger(state.clone());
+        let c = &cfg.cloud_dns;
+        if let Some(svc) = &state.dns {
+            svc.start_network_refresher(state.store.clone());
+        }
+        if !c.udp_listen.is_empty() {
+            hygeia_runtime::frontends::spawn_udp(state.clone(), &c.udp_listen)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        if !c.tcp_listen.is_empty() {
+            hygeia_runtime::frontends::spawn_tcp(state.clone(), &c.tcp_listen)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        if !c.dot_listen.is_empty() {
+            if c.dot_domain.is_empty() {
+                return Err("cloud_dns.dot_listen needs cloud_dns.dot_domain".into());
+            }
+            if cfg.tls.cert.is_empty() {
+                return Err("cloud_dns.dot_listen needs [tls] cert and key".into());
+            }
+            let dot_tls = hygeia_api::tls::TlsSource::load(
+                std::path::Path::new(&cfg.tls.cert),
+                std::path::Path::new(&cfg.tls.key),
+                &["dot"],
+            )
+            .map_err(|e| format!("[tls]: {e}"))?;
+            dot_tls.spawn_watcher();
+            hygeia_runtime::frontends::spawn_dot(
+                state.clone(),
+                &c.dot_listen,
+                dot_tls,
+                &c.dot_domain,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+        if !c.doq_listen.is_empty() {
+            return Err("cloud_dns.doq_listen is not available in this build".into());
+        }
     }
 
     // Data plane: DNS follows the control plane by pulling the signed bundle.

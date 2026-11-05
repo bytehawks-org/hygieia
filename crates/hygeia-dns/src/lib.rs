@@ -133,6 +133,30 @@ pub fn question(packet: &[u8]) -> Option<(String, String)> {
     ))
 }
 
+/// REFUSED reply (rcode 5) for `packet`: used for sources that are not registered. Header only, so
+/// it can never be larger than the query (no amplification).
+pub fn refused(packet: &[u8]) -> Vec<u8> {
+    if packet.len() < 12 {
+        return Vec::new();
+    }
+    let mut r = vec![0u8; 12];
+    r[0] = packet[0];
+    r[1] = packet[1];
+    r[2] = 0x80 | (packet[2] & 0x01); // QR, copy RD
+    r[3] = 0x80 | 0x05; // RA, REFUSED
+    r
+}
+
+/// Truncated (TC) empty reply: tells a UDP client to retry over TCP.
+pub fn truncated(packet: &[u8]) -> Vec<u8> {
+    let mut r = refused(packet);
+    if r.len() == 12 {
+        r[2] |= 0x02;
+        r[3] &= 0xf0; // NOERROR
+    }
+    r
+}
+
 /// SERVFAIL reply for `packet` (empty if it cannot be parsed).
 pub fn servfail(packet: &[u8]) -> Vec<u8> {
     Message::from_vec(packet)
