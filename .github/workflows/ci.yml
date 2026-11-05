@@ -84,6 +84,38 @@ jobs:
         working-directory: web
         run: node test/e2e-node.mjs
 
+  extension-e2e:
+    # Real Chromium + the real extension against the real server and node. Passes locally; advisory
+    # until it has had its first green run on GitHub's runners.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.130
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: ./extension/build.sh
+      - run: cargo build -p hygeia -p hygeia-proxy
+      - name: Install Playwright Chromium
+        working-directory: extension
+        run: |
+          npm install --no-save playwright
+          npx playwright install --with-deps chromium
+          echo "CHROMIUM=$(node -e "console.log(require('playwright').chromium.executablePath())")" >> "$GITHUB_ENV"
+      - name: Extension end-to-end (server)
+        run: node extension/test/e2e.mjs
+      - name: Extension end-to-end (standalone node)
+        run: node extension/test/e2e.mjs
+        env:
+          E2E_TARGET: node
+
   windows:
     # Unproven: first run will show whether the node builds and its tests pass on Windows.
     runs-on: windows-latest

@@ -1,213 +1,163 @@
+<div align="center">
+
 # Hygieia
 
-Rust DNS and content filtering stack. Single-org or multi-tenant (single-org = multi-tenant with N=1, same code path), open-license blocklists, custom rules, audit and query logging, GDPR/NIS2 oriented. Self-hosted, container-first.
+**Filtering DNS and browser content blocking from one signed policy.**
+Self-hosted, multi-tenant, auditable. Written in Rust.
+
+[![ci](https://github.com/bytehawks-org/hygieia/actions/workflows/ci.yml/badge.svg)](https://github.com/bytehawks-org/hygieia/actions/workflows/ci.yml)
+[![codeql](https://github.com/bytehawks-org/hygieia/actions/workflows/codeql.yml/badge.svg)](https://github.com/bytehawks-org/hygieia/actions/workflows/codeql.yml)
+[![audit](https://github.com/bytehawks-org/hygieia/actions/workflows/audit.yml/badge.svg)](https://github.com/bytehawks-org/hygieia/actions/workflows/audit.yml)
+[![coverage](https://github.com/bytehawks-org/hygieia/actions/workflows/coverage.yml/badge.svg)](https://github.com/bytehawks-org/hygieia/actions/workflows/coverage.yml)
+[![release](https://img.shields.io/github/v/release/bytehawks-org/hygieia?include_prereleases&label=release)](https://github.com/bytehawks-org/hygieia/releases)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![last commit](https://img.shields.io/github/last-commit/bytehawks-org/hygieia)](https://github.com/bytehawks-org/hygieia/commits)
+
+![Linux](https://img.shields.io/badge/Linux-tested-brightgreen)
+![Chromium](https://img.shields.io/badge/Chromium-e2e%20tested-brightgreen)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-336791)
+![Windows](https://img.shields.io/badge/Windows-experimental-orange)
+![Firefox](https://img.shields.io/badge/Firefox-untested-orange)
+
+[Documentation](docs/README.md) ·
+[Getting started](docs/guides/getting-started.md) ·
+[Architecture](docs/architecture/overview.md) ·
+[API](docs/reference/api.md) ·
+[Roadmap](docs/ROADMAP.md)
+
+</div>
+
+---
+
+Hygieia compiles open-license filter lists and your own rules into **one versioned, ed25519-signed bundle**. The browser extension, the DNS server and the local node all load that same artefact through the same engine, so a rule means the same thing everywhere. A control plane adds multi-tenancy, RBAC, OIDC, and a tamper-evident audit trail.
+
+## Highlights
+
+- **One policy, many enforcement points.** Precedence is fixed: custom allow > custom block > list allow > list block > default.
+- **Signed and verifiable.** Clients verify the signature before decoding and refuse rollbacks; the extension pins the key.
+- **Runs the way you need it.** A *standalone node* on one PC (no database, no IdP), a *central server* for an organisation (PostgreSQL, OIDC, replicas), or both: nodes in front of a server, caching bundles and surviving outages.
+- **DNS is opt-in.** The default install never touches the system resolver. Local DNS filtering and a cloud DNS-over-HTTPS service (per-token, never an open resolver) are options.
+- **Multi-tenant by construction.** Single-organisation is the same code path with one tenant. PostgreSQL row-level security enforces isolation; tenant and group derive from the credential, never from request parameters.
+- **Auditable.** Per-tenant SHA-256 hash chain, verification endpoint, append-only at the database, secrets never in diffs.
+- **Open lists, downloaded at runtime** (HaGeZi, StevenBlack, URLhaus, EasyList/EasyPrivacy, uBlock filters), each with license and attribution; lists are treated as hostile input.
+- **Browser content blocking:** network blocking, element hiding and scriptlets for Chrome (MV3) and Firefox (MV3), engine compiled to WASM.
+- **Small and fast.** 240k domains: ≈ 1 µs per lookup, +63 MB, signed bundle ≈ 5–8 MB.
 
 ```mermaid
-flowchart TD
-  admin[hygeia-admin UI] --> api[hygeia-api: REST, enrollment, bundle signing]
-  api --> dns[hygeia-dns]
-  api --> proxy[hygeia-proxy]
-  api -.-> blocker[hygeia-blocker: WebExtension + WASM]
-  proxy -.-> blocker
-  dns & proxy & blocker --> core[hygeia-core: matcher, policy, list parsers, bundle]
+flowchart LR
+  subgraph Control["Control plane"]
+    UI[Admin UI] --> API[REST API · RBAC · audit]
+    API --> ST[(PostgreSQL / file)]
+    LISTS[Lists] --> API --> BUNDLE[Signed bundle]
+  end
+  BUNDLE --> EXT[Browser extension<br/>Chrome · Firefox · WASM]
+  BUNDLE --> DNS[DNS · UDP · DoH]
+  BUNDLE --> NODE[Node<br/>standalone or connected]
+  NODE --> EXT
 ```
 
-## Design principles
+## Quick start
 
-- `hygeia-core` is sync, I/O-free, runtime-free, so it compiles to WASM (CI checks `wasm32-unknown-unknown`).
-- The API compiles lists + custom rules into one **versioned, ed25519-signed bundle**; DNS, proxy and blocker load the same artefact. Data planes are stateless and pull.
-- Precedence: custom allow > custom block > list allow > list block > default.
-- Credentials: `hyg_enr_` (short-lived, limited uses) is exchanged once for `hyg_dev_` (per device, revocable). Only SHA-256 hashes are stored; tenant/group come from the credential, never from client parameters.
-- Audit: append-only SHA-256 hash chain, CEF export. Secrets never enter audit diffs.
-- Lists are downloaded at runtime, never bundled in the code; each source carries license + attribution in bundle metadata. **Verify each list's license before enabling it.**
-- TLS MITM (proxy) is opt-in at two levels: cargo feature `mitm` and config flag. Default tier: DNS + extension.
-
-## Architecture and roadmap
-
-- `docs/architecture/node.md`: the installable **node** (`hygeia-proxy`): standalone local server for one PC, or endpoint/connector for a central multi-instance server (RBAC, configuration and audit stay central).
-- `docs/ROADMAP.md`: ordered work queue.
-
-## Status
-
-| Crate | State |
-|---|---|
-| `hygeia-core` | Done: trie matcher, hosts/domains/ABP(domain-level) parsers, policy, cosmetic model, signed bundle. Tested; builds for wasm32 |
-| `hygeia-lists` | Catalogue (HaGeZi, StevenBlack, URLhaus, EasyList/EasyPrivacy, uBlock filters), https-only downloader with ETag/304 and size cap, parsing at refresh time, shrink/empty guards, per-source status. Missing: scheduler persistence, AdGuard/other scriptlet dialects |
-| `hygeia-audit` | Done: hash chain, verify, CEF. Missing: syslog/OTLP sinks, external head anchoring |
-| `hygeia-store` | PostgreSQL (sqlx) is the production store: RLS tenant isolation, per-tenant audit chain, composite FKs. tenants/groups, users, role bindings, API tokens. In-memory store for tests. Missing: sqlx offline cache |
-| `hygeia-api` | Enroll, bundle (ETag/304), rules CRUD, simulate (dry-run), audit + verify. Static admin token. `/v1/admin/lists` (+`/refresh`). Missing: OIDC + RBAC wiring, OpenAPI (utoipa), gRPC, groups/time windows, regex rules |
-| `hygeia-dns` | UDP server, block via NXDOMAIN/null IP, plain UDP upstream. Missing: TCP, DoT/DoH/DoQ, DoT upstream, tenant resolution, query log, metrics |
-| `hygeia-proxy` | **Standalone node** (binary `hygeia-proxy`): file-backed store, persisted signing key and local-owner credential, extension feed, local admin UI, Host/Origin guard, opt-in local DNS, CLI. `mode = "connected"` is not implemented yet (roadmap 2); no packaging/service/tray yet (roadmap 4). See *Standalone node* |
-| `hygeia-runtime` | Shared helpers (list refresher, DNS follower, key files, `[lists]` config) used by the server and the node |
-| `hygeia-blocker` | Engine (signature check + rollback guard, URL/host verdicts, cosmetics, DNR plan) native + WASM; Chrome MV3 and Firefox MV3 extension in `extension/` (enrollment, bundle sync, DNR or webRequest blocking, element hiding, scriptlets); Chromium e2e-tested in a real browser, Firefox lint + fake-API tests only (not yet run in real Firefox). Missing: procedural selectors, more scriptlets, per-tenant fail-closed — see `extension/README.md` |
-| `web/` | Admin UI: Next.js 16 static export + Tailwind, served by the API (no Node at runtime): overview, rules + what-if simulation, devices + one-time enrollment tokens, filter-list status/licenses, audit + chain verification, groups / role bindings / API tokens, tenants. Token and OIDC (authorization code + PKCE) login. Real-browser e2e against the real server and a mock IdP. Missing: OIDC refresh (session ends with the ID token), OpenAPI-generated client, i18n |
-
-## Install as a service (Linux)
+Prerequisites: Rust stable, Node.js 22, `curl`, `python3` (PostgreSQL optional).
 
 ```bash
-(cd web && npm ci && npm run build) && cargo build --release -p hygeia-proxy
-packaging/linux/build-deb.sh target/release/hygeia-proxy web/out dist
-sudo dpkg -i dist/hygeia-proxy_*.deb
-sudo systemctl enable --now hygeia-proxy
-sudo hygeia-proxy token        # credential for http://127.0.0.1:8470/login/
+git clone https://github.com/bytehawks-org/hygieia && cd hygieia
+(cd web && npm ci && npm run build)          # admin UI (static; served by the binaries)
 ```
 
-Config: `/etc/hygeia-proxy/hygeia-proxy.toml` (all keys optional; DNS stays off). State: `/var/lib/hygeia-proxy`. The unit runs as a dynamic user with a hardened sandbox. Windows (untested): unzip the CI artifact and run `install.ps1` from an elevated PowerShell (service `HygeiaProxy`, data in `%ProgramData%\Hygeia`). An RPM spec is in `packaging/linux/` (not yet built or tested).
-
-## Standalone node
-
-`hygeia-proxy` is the installable local server (design: `docs/architecture/node.md`). Standalone mode needs no database, no OIDC and no network configuration:
+**On one PC: the standalone node**
 
 ```bash
-(cd web && npm ci && npm run build)
-cargo run -p hygeia-proxy -- run           # foreground; UI + API + extension feed on http://127.0.0.1:8470/
-hygeia-proxy open                           # opens the UI already signed in as the local owner
-hygeia-proxy pubkey                         # public key to pin in the browser extension
-hygeia-proxy info | token | check-config
+cargo run -p hygeia-proxy -- run             # UI + API + extension feed on http://127.0.0.1:8470/
+cargo run -p hygeia-proxy -- open            # opens the UI already signed in
 ```
 
-State lives in one directory (`hygeia-proxy info` prints it; override with `--data-dir` or `HYGEIA_PROXY_DATA_DIR`): `state.json` (atomic snapshot of rules, devices, tokens and the audit chain, mode 0600, previous copy kept as `.bak`), `signing.key` (stable: browsers pin its public half), `owner.token` (the local owner credential), optional `hygeia-proxy.toml`. A damaged or tampered `state.json` (including a broken audit chain) stops the node instead of being silently reset.
-
-```toml
-# hygeia-proxy.toml, every section optional
-[http]
-listen = "127.0.0.1:8470"      # loopback by default; other addresses need allow_lan = true + allowed_hosts
-[dns]
-mode = "off"                    # default: no DNS, OS resolver untouched. "local": filter DNS on this machine
-listen = "127.0.0.1:5353"       # port 53 needs privileges
-upstream = ["9.9.9.9:53"]
-[lists]
-refresh_hours = 12              # same [lists] section as the server
-```
-
-Local security: loopback only; every request must carry an expected `Host` header (blocks DNS rebinding) and state-changing requests a same-origin (or, for the extension endpoints only, an extension) `Origin`; the credential never appears in process arguments (`open` uses a short-lived private redirect page and the URL *fragment*). The browser extension points at the node's URL and pins `hygeia-proxy pubkey`.
-
-Not yet: connecting to a central server, packaging (deb/rpm/MSI), Windows service, tray icon, OS-resolver integration. Linux is tested; **Windows is not**: only the core, audit, store and DNS crates were cross-checked for `x86_64-pc-windows-gnu` (the rest needs a Windows C toolchain; a `windows-latest` CI job is configured but unproven).
-
-## Admin UI
+**For an organisation: the central server**
 
 ```bash
-(cd web && npm ci && npm run build)            # static export -> web/out
-HYGEIA_ENVIRONMENT=dev HYGEIA_WEB_DIR=web/out cargo run -p hygeia   # UI at http://127.0.0.1:8080/
+HYGEIA_ENVIRONMENT=dev cargo run -p hygeia   # http://127.0.0.1:8080/ ; prints a throwaway break-glass token
 ```
 
-The binary serves the UI from `api.web_dir` / `HYGEIA_WEB_DIR` (the container image ships it in `/usr/share/hygeia/web`); API routes win over the UI fallback. `next dev` proxies `/v1` to `127.0.0.1:8080`.
+Then connect a browser (`./extension/build.sh`, load `extension/`, enter the URL, an enrolment token and the public key) and see it work:
 
-- **Login**: API token / break-glass (pasted, validated against `/v1/me`), or single sign-on when `auth.oidc.client_id` is set. SSO is the authorization-code flow with PKCE S256, state and nonce; the UI sends the **ID token**, so `auth.oidc.audience` must equal the client id (or an audience your IdP puts in the ID token). The IdP must allow CORS on its token endpoint for the UI origin; add its origin to `auth.oidc.ui_connect_src` if it differs from the issuer's. There is no refresh: the session ends when the ID token expires.
-- **Credential storage**: `sessionStorage` (per tab, never persisted). An XSS could read it, so the UI ships a strict **CSP without `unsafe-inline` scripts**: SHA-256 hashes of Next's inline bootstrap scripts are computed from the build at startup. Also `frame-ancestors 'none'`, `nosniff`, `no-referrer`; API data is rendered through React escaping only.
-- **One-time secrets** (enrollment tokens, API tokens) are shown once and never stored by the UI.
-- The UI hides what a role cannot do, but authorisation is enforced by the API; a 403 is shown as a message.
-
-## Filter lists
-
-Downloaded at runtime (never vendored), default every 12 h, bounded to 64 MiB per list, https only. Each source records license and attribution into the signed bundle. Select sources in `hygeia.toml`:
-
-```toml
-[lists]
-refresh_hours = 12
-sources = ["hagezi-pro", "easylist", "ublock-filters", "ublock-quick-fixes"]  # unset = catalogue defaults
-
-[[lists.custom]]            # license + attribution are mandatory
-id = "mine"
-name = "My list"
-url = "https://example.com/list.txt"
-format = "domains"          # hosts | domains | abp
-license = "CC0-1.0"
-attribution = "me"
-network = true              # feeds DNS / proxy
-cosmetic = false            # feeds the blocker (element hiding + scriptlets)
+```bash
+scripts/smoke-node.sh      # 19 behaviour checks against the real node binary
+scripts/smoke-server.sh    # 32 checks: RBAC, tenants, DoH gating, audit, connected node, offline behaviour
 ```
 
-**Per-tenant selection.** The platform config decides which sources are *available* (downloaded). Each tenant then has a policy: `all` (default: every available list) or `selected` (only its subscriptions, tenant-wide or per policy group; a group subscription never reaches other groups). Managed in the UI (*Filter lists*) or via `GET /v1/admin/list-subscriptions`, `PUT /v1/admin/list-policy`, `POST`/`DELETE /v1/admin/list-subscriptions` (needs the rules-write permission; every change is audited and takes effect on the next bundle pull). The catalogue with licenses is mirrored into PostgreSQL (`list_sources`); sources removed from the configuration are disabled, not deleted, so existing subscriptions survive. The built-in DNS server still serves only the default tenant (tenant resolution per DoH/DoT/CIDR is not implemented yet).
+Step by step: [Getting started](docs/guides/getting-started.md).
 
-Two kinds of rules, kept separate per source (`network` / `cosmetic`): domain rules (DNS, proxy) and DOM/JS rules (element hiding, `##+js(...)` scriptlet calls for the blocker). Lists are untrusted input:
+## Install
 
-- selectors are validated against CSS rule breakout (`}`, `;`, `@`, `url(`, unbalanced quotes/brackets) before they can reach a page;
-- scriptlets are shipped as *data* (name + args); `trusted-*` scriptlets, which are privileged in uBlock Origin, are dropped by default;
-- procedural selectors (`:has-text`, `:xpath`, ...), HTML filters (`##^`), `#?#`, `#$#`, AdGuard `#%#` and entity domains (`google.*`) are skipped and counted per source;
-- a refresh that returns no usable rules, or shrinks below 50% of the previous count, is rejected and the previous copy is kept.
-
-Footprint measured on HaGeZi PRO (240k domains): trie build ~0.2 s, +63 MB RSS, ~0.8 µs/lookup; signed bundle ~4.8 MB (uncompressed). `hagezi-tif` (1.7M domains) is off by default for that reason.
-
-Licenses in the catalogue are GPL-3.0 (HaGeZi, uBlock filters), GPL-3.0-or-later OR CC-BY-SA-3.0 (EasyList family), MIT (StevenBlack), CC0 (URLhaus). Not bundling the lists avoids copyleft on this code, but **redistributing list-derived bundles to third parties is a separate question: verify before offering Hygieia as a service to other organisations.**
-
-Live check against upstream: `cargo test -p hygeia-lists --test live -- --ignored --nocapture`.
-
-## Authentication
-
-Admin API credentials (`Authorization: Bearer ...`), all authorised through roles (`owner` platform-wide, `admin`, `editor`, `viewer`, `auditor`; matrix in `crates/hygeia-store/src/rbac.rs`):
-
-| Credential | Identity / scope | Use |
+| Target | How | State |
 |---|---|---|
-| OIDC JWT | `(iss, sub)` → roles from `role_bindings`, per tenant or platform-wide | humans (the admin UI runs the PKCE flow with the IdP and sends the token) |
-| `hyg_api_...` | one tenant, one role, optional expiry, revocable | automation |
-| break-glass | everything (owner-equivalent) | **staging/dev only**, see below |
+| Linux `.deb` + systemd | `packaging/linux/build-deb.sh` or the release asset; `systemctl enable --now hygeia-proxy` | built and installed in a container; unit not run on a live systemd host |
+| Linux tarballs | release assets (`hygeia-proxy`, `hygeia-server`) | built by CI |
+| Linux RPM | `packaging/linux/hygeia-proxy.spec` | written, **never built** |
+| Windows service + tray | release zip → `install.ps1` (elevated) | cross-type-checked, **never run on Windows** |
+| Container (server) | `podman build -f deploy/Containerfile -t hygeia .` | Containerfile provided (distroless, non-root); **not built in CI** |
+| Browser extension | release zips or `extension/build.sh` + load unpacked | Chromium e2e tested; Firefox lint + fake-API tests only |
 
-Device credentials (`hyg_dev_...`) never open the admin API.
+Releases are cut by tagging `vX.Y.Z` (workflow `release`, draft release with `SHA256SUMS`). Artefacts are **unsigned**.
 
-- A user created by a first OIDC login has **no roles** until bound. Identity is `(iss, sub)`: the e-mail claim is never used for authorisation. Algorithms are asymmetric only (RS*/ES*), issuer and audience are mandatory, `none`/HS* forgeries are rejected (tested).
-- No privilege escalation: a principal can only grant roles whose permissions it holds in that scope; `owner` exists only platform-wide and a tenant-scoped "owner" gains no tenant-management rights.
-- First owner in production: `auth.oidc.bootstrap_owners = ["<sub claim>"]` grants the platform `owner` role at startup (idempotent, additive).
+## What works today
 
-### Break-glass (staging)
+| Area | Status |
+|---|---|
+| Engine, signed bundles, list parsers (hosts, domains, ABP domain-level, cosmetic + scriptlets) | done, tested, builds for `wasm32` |
+| Filter-list manager (catalogue, https-only, ETag, size/shrink guards, per-tenant selection) | done |
+| Control plane: enrolment, bundles, rules, simulate, devices, groups, tenants, users/roles, API tokens, audit | done |
+| Authentication: OIDC resource server, API tokens, break-glass (staging), local owner (node) | done |
+| Storage: PostgreSQL with RLS (production), file store (node), in-memory (tests), one conformance suite | done |
+| Admin UI (Next.js 16 + Tailwind 4, strict CSP, OIDC PKCE) | done; no OIDC refresh, no OpenAPI client |
+| Standalone node: file state, host/origin guard, opt-in local DNS, CLI | done on Linux |
+| Connected node: relay, pinned key, rollback guard, disk cache, offline serving | done; no local DNS or telemetry in connected mode |
+| Central redundancy: shared compiled bundles, coordinated list refresh, `/readyz`, graceful drain | done; tested with in-process replicas |
+| Cloud DNS (DoH, per-token, rate limited) | first slice; **no DoT, query log or metrics yet** |
+| Packaging: `.deb`, systemd, Windows service/tray | see *Install* |
+| OpenAPI + generated client, DNS query log, DoT, MSI, wizard | planned: [Roadmap](docs/ROADMAP.md) |
 
-A single static credential for environments where OIDC is not available:
+## Documentation
 
-```toml
-[auth]
-environment = "staging"        # production (default) refuses to start with break-glass enabled
-[auth.break_glass]
-enabled = true
-ttl_hours = 12                 # the credential dies this long after process start (0 = no limit)
-```
+| | |
+|---|---|
+| **Guides** | [Getting started](docs/guides/getting-started.md) · [Server](docs/guides/server.md) · [Node](docs/guides/node.md) · [Extension](docs/guides/extension.md) · [Filter lists](docs/guides/filter-lists.md) · [Cloud DNS](docs/guides/cloud-dns.md) |
+| **Reference** | [Configuration](docs/reference/configuration.md) · [API](docs/reference/api.md) · [CLI](docs/reference/cli.md) · [Data formats](docs/reference/data-formats.md) |
+| **Design** | [Overview](docs/architecture/overview.md) · [Node](docs/architecture/node.md) · [DNS service](docs/architecture/dns-service.md) |
+| **Trust** | [Security](docs/security.md) · [Privacy and compliance](docs/privacy-compliance.md) |
+| **Running it** | [Operations](docs/operations.md) · [Testing](docs/testing.md) · [Development](docs/development.md) · [Roadmap](docs/ROADMAP.md) |
 
-```bash
-export HYGEIA_BREAK_GLASS_TOKEN="$(openssl rand -hex 24)"   # >= 32 chars; secrets are never read from the file
-```
+## Security in one paragraph
 
-Properties: refused when `environment = "production"` (also if `HYGEIA_ENVIRONMENT` tries to override it); secret length enforced; constant-time comparison on SHA-256 digests; 200 ms delay on failed authentication; **every request made with it is written to the audit chain of the affected tenant** (`auth.break_glass`, actor `break-glass`) and logged at WARN. It is a shared secret: restrict the listener at the network layer, rotate it after use, and prefer a time-limited process. `environment = "dev"` generates a throwaway token if none is given.
+Credentials are 256-bit random, stored as SHA-256 only, shown once. OIDC identity is `(iss, sub)`; roles never escalate; break-glass is refused in production and audited on every use. Bundles are signed and verified before decoding. The node binds loopback, checks `Host` and `Origin`, and never puts credentials in process arguments. The admin UI has a strict CSP. PostgreSQL enforces tenant isolation and an append-only audit table. **Not yet covered:** TLS in the binaries (terminate in front), rate limiting of admin endpoints, DNS query log, signed releases. Read [Security](docs/security.md) before deploying; report vulnerabilities privately (GitHub *Security → Report a vulnerability*).
 
-## Try it
-
-```bash
-HYGEIA_ENVIRONMENT=dev cargo run -p hygeia     # prints a throwaway break-glass token
-```
-
-Defaults: API `127.0.0.1:8080`, DNS `127.0.0.1:5353` (UDP), upstream `9.9.9.9:53`. Optional `hygeia.toml` (every section optional):
-
-```toml
-[api]
-listen = "0.0.0.0:8080"
-
-[dns]
-listen = "0.0.0.0:53"
-upstream = ["192.168.1.1:53"]
-block_mode = "nxdomain"   # or "null_ip"
-```
-
-Persistence (PostgreSQL 17 baseline (schema needs 15+); without it the store is in-memory and non-persistent):
+## Testing
 
 ```bash
-export HYGEIA_DATABASE_URL=postgres://hygeia_app:***@db/hygeia   # runtime role: non-owner, subject to RLS
-export HYGEIA_MIGRATE_URL=postgres://hygeia_owner:***@db/hygeia  # schema owner: runs migrations at startup
+scripts/check-all.sh           # fmt, clippy, Rust tests, wasm check, JS unit tests, with a PASS/FAIL table
+scripts/check-all.sh --all     # + real-Chromium e2e and the behaviour smoke scenarios
+cargo test -p hygeia-core --release --test scale -- --ignored --nocapture   # footprint report at 240k domains
 ```
 
-Create the `hygeia_app` role **before** the first migration (grants are applied only if it exists). Tenant isolation: every tenant-scoped query runs in a transaction with `set_config('app.tenant', ..., true)`; RLS policies hide all other rows, and if the setting is missing no rows are visible. Device auth and enrollment happen before the tenant is known and go through `SECURITY DEFINER` functions. `audit_events` is append-only (trigger, also against the owner).
+CI runs formatting, clippy (`-D warnings`), the full test suite against PostgreSQL 17, the WASM build, Chromium end-to-end tests for the extension and the UI, CodeQL, dependency audits (RustSec, licences, npm), and packaging. What is and is not verified: [Testing](docs/testing.md).
 
-Known limitation: the bundle cache is per process, so with several API replicas each compiles its own bundle (different version/ETag). Persisting compiled bundles is on the roadmap.
+## Repository layout
 
-Set `HYGEIA_SIGNING_KEY` (64 hex chars) for a stable bundle key; otherwise an ephemeral one is generated at start.
-
-```bash
-# TOKEN = the break-glass token printed at startup
-curl -XPOST localhost:8080/v1/admin/rules -H "authorization: Bearer $TOKEN" \
-  -H 'content-type: application/json' -d '{"action":"block","pattern":"ads.example.com"}'
-dig @127.0.0.1 -p 5353 x.ads.example.com   # NXDOMAIN after the next bundle refresh (<=5s)
+```
+crates/   hygeia-core · -audit · -store · -lists · -api · -dns · -runtime · -blocker · hygeia (server) · hygeia-proxy (node) · -winsvc · -tray
+extension/  Chrome + Firefox MV3        web/  admin UI        packaging/  deb · systemd · rpm · windows
+deploy/     container image             docs/  documentation  scripts/    check-all · smoke scenarios
 ```
 
-## Develop
+## Filter-list licenses
 
-```bash
-cargo test --workspace   # Postgres tests run if HYGEIA_TEST_PG_ADMIN and HYGEIA_TEST_PG_APP are set (see crates/hygeia-store/tests/pg.rs)
-cargo check -p hygeia-core --target wasm32-unknown-unknown
-```
+Lists are downloaded at runtime and never vendored. Catalogue licenses: GPL-3.0 (HaGeZi, uBlock filters), GPL-3.0-or-later OR CC-BY-SA-3.0 (EasyList family), MIT (StevenBlack), CC0-1.0 (URLhaus). Each bundle carries every source's license and attribution. Running Hygieia for yourself does not change those licenses; **redistributing list-derived bundles to third parties is a separate question: check it before offering Hygieia as a service** ([details](docs/guides/filter-lists.md#licenses)).
+
+## Contributing
+
+Issues and pull requests are welcome. Start with [Development](docs/development.md); run `scripts/check-all.sh` before pushing. Keep `hygeia-core` free of I/O and runtimes, keep secrets out of logs and audit diffs, and add behaviour to the store conformance suite when you touch persistence.
+
+## License
+
+[Apache-2.0](LICENSE). Third-party lists keep their own licenses; dependency licenses are policed in CI (`deny.toml`).

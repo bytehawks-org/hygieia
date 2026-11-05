@@ -1,0 +1,28 @@
+name: audit
+# Supply-chain checks: known vulnerabilities (RustSec, npm) and dependency licences.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths: ['**/Cargo.toml', 'Cargo.lock', 'deny.toml', 'web/package*.json', 'extension/package*.json', '.github/workflows/audit.yml']
+  schedule:
+    - cron: '41 5 * * *'
+permissions:
+  contents: read
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+      - run: cargo audit
+      - run: cargo deny check licenses bans sources
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: cd web && npm ci && npm audit --omit=dev --audit-level=high

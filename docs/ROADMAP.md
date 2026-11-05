@@ -15,6 +15,8 @@ Order matters: items 1–4 were requested ahead of the previously suggested step
 
 ## Done
 
+Documentation (`docs/`), README with status badges, behaviour smoke scenarios (`scripts/`), CodeQL / audit / coverage / release workflows, scale report test.
+
 Cloud DNS, first slice (item 5): `hyg_dns_` tokens (store, RLS, API), DoH endpoint with per-token rate limit and tenant bundles.
 
 Central redundancy, core (item 3): `compiled_bundles` table, content-addressed bundles shared across replicas, readiness probe, graceful SIGTERM, lease-based coordinated list refresh with lists shared through the store.
