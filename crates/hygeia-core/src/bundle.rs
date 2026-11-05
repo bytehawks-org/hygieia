@@ -27,7 +27,7 @@ pub struct SourceMeta {
 }
 
 /// A downloaded source after parsing: network (domain) rules and cosmetic rules.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParsedSource {
     pub meta: SourceMeta,
     pub allow: Vec<String>,
@@ -62,6 +62,17 @@ pub enum BundleError {
     BadSignature,
     #[error("decode error: {0}")]
     Decode(String),
+}
+
+impl ParsedSource {
+    /// Compact binary form, used to share a parsed list between server replicas.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        postcard::to_stdvec(self).expect("serialisation is infallible")
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Result<Self, BundleError> {
+        postcard::from_bytes(b).map_err(|e| BundleError::Decode(e.to_string()))
+    }
 }
 
 /// Encoded + signed bundle bytes.

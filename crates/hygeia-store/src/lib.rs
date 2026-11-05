@@ -132,6 +132,13 @@ pub trait Store: Send + Sync {
         group_id: &str,
         candidate: StoredBundle,
     ) -> Result<StoredBundle>;
+    /// Named lease: true if `holder` now holds it (acquired, renewed, or taken over after expiry).
+    async fn try_lease(&self, name: &str, holder: &str, ttl_secs: i64, now: i64) -> Result<bool>;
+    /// Platform-level shared artefacts (parsed lists...), keyed and content-hashed.
+    async fn put_shared(&self, key: &str, hash: &str, bytes: &[u8]) -> Result<()>;
+    /// `(key, hash)` of every shared artefact whose key starts with `prefix`.
+    async fn shared_index(&self, prefix: &str) -> Result<Vec<(String, String)>>;
+    async fn get_shared(&self, key: &str) -> Result<Option<(String, Vec<u8>)>>;
     /// Cheap liveness check of the backing store (readiness probe).
     async fn ping(&self) -> Result<()>;
 
@@ -329,6 +336,8 @@ pub(crate) struct State {
     pub(crate) rules: Vec<Rule>,
     pub(crate) bundle_version: HashMap<(String, String), u64>,
     pub(crate) compiled: HashMap<(String, String), StoredBundle>,
+    pub(crate) leases: HashMap<String, (String, i64)>,
+    pub(crate) shared: HashMap<String, (String, Vec<u8>)>,
     pub(crate) audit: HashMap<String, AuditLog>,
     pub(crate) tenants: Vec<Tenant>,
     pub(crate) groups: Vec<Group>,
@@ -544,6 +553,43 @@ impl Store for MemoryStore {
                 Ok(candidate)
             }
         }
+    }
+
+    async fn try_lease(&self, name: &str, holder: &str, ttl_secs: i64, now: i64) -> Result<bool> {
+        let mut s = self.s.lock().unwrap();
+        match s.leases.get(name) {
+            Some((h, until)) if h != holder && *until > now => Ok(false),
+            _ => {
+                s.leases
+                    .insert(name.to_string(), (holder.to_string(), now + ttl_secs));
+                Ok(true)
+            }
+        }
+    }
+
+    async fn put_shared(&self, key: &str, hash: &str, bytes: &[u8]) -> Result<()> {
+        self.s
+            .lock()
+            .unwrap()
+            .shared
+            .insert(key.to_string(), (hash.to_string(), bytes.to_vec()));
+        Ok(())
+    }
+
+    async fn shared_index(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        let s = self.s.lock().unwrap();
+        let mut v: Vec<_> = s
+            .shared
+            .iter()
+            .filter(|(k, _)| k.starts_with(prefix))
+            .map(|(k, (h, _))| (k.clone(), h.clone()))
+            .collect();
+        v.sort();
+        Ok(v)
+    }
+
+    async fn get_shared(&self, key: &str) -> Result<Option<(String, Vec<u8>)>> {
+        Ok(self.s.lock().unwrap().shared.get(key).cloned())
     }
 
     async fn ping(&self) -> Result<()> {

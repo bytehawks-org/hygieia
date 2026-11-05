@@ -370,6 +370,23 @@ impl Store for FileStore {
         self.inner.store_compiled(t, g, c).await
     }
 
+    // Coordination state is ephemeral: not persisted.
+    async fn try_lease(&self, n: &str, h: &str, ttl: i64, now: i64) -> Result<bool> {
+        self.inner.try_lease(n, h, ttl, now).await
+    }
+
+    async fn put_shared(&self, key: &str, hash: &str, bytes: &[u8]) -> Result<()> {
+        self.inner.put_shared(key, hash, bytes).await
+    }
+
+    async fn shared_index(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        self.inner.shared_index(prefix).await
+    }
+
+    async fn get_shared(&self, key: &str) -> Result<Option<(String, Vec<u8>)>> {
+        self.inner.get_shared(key).await
+    }
+
     async fn ping(&self) -> Result<()> {
         Ok(())
     }

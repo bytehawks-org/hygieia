@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             insecure,
         );
         let interval = Duration::from_secs(cfg.lists.refresh_hours.max(1) * 3600);
-        hygeia_runtime::spawn_list_refresher(state.clone(), manager, interval);
+        hygeia_runtime::coordinated::spawn(state.clone(), manager, interval);
     }
 
     let listener = tokio::net::TcpListener::bind(&cfg.api.listen).await?;

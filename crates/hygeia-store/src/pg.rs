@@ -428,6 +428,57 @@ impl Store for PgStore {
         Ok(winner)
     }
 
+    async fn try_lease(&self, name: &str, holder: &str, ttl_secs: i64, now: i64) -> Result<bool> {
+        // One atomic statement: insert, or take over only if ours or expired.
+        let r = sqlx::query(
+            "insert into leases (name, holder, until) values ($1, $2, to_timestamp($3::bigint + $4::bigint))
+             on conflict (name) do update set holder = excluded.holder, until = excluded.until
+               where leases.holder = excluded.holder or leases.until < to_timestamp($3::bigint)",
+        )
+        .bind(name)
+        .bind(holder)
+        .bind(now)
+        .bind(ttl_secs)
+        .execute(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(r.rows_affected() == 1)
+    }
+
+    async fn put_shared(&self, key: &str, hash: &str, bytes: &[u8]) -> Result<()> {
+        sqlx::query(
+            "insert into shared_blobs (key, hash, bytes) values ($1, $2, $3)
+             on conflict (key) do update set hash = excluded.hash, bytes = excluded.bytes, updated_at = now()",
+        )
+        .bind(key)
+        .bind(hash)
+        .bind(bytes)
+        .execute(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(())
+    }
+
+    async fn shared_index(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query(
+            "select key, hash from shared_blobs where starts_with(key, $1) order by key",
+        )
+        .bind(prefix)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(rows.iter().map(|r| (r.get("key"), r.get("hash"))).collect())
+    }
+
+    async fn get_shared(&self, key: &str) -> Result<Option<(String, Vec<u8>)>> {
+        let r = sqlx::query("select hash, bytes from shared_blobs where key = $1")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_err)?;
+        Ok(r.map(|r| (r.get("hash"), r.get("bytes"))))
+    }
+
     async fn ping(&self) -> Result<()> {
         sqlx::query("select 1")
             .execute(&self.pool)

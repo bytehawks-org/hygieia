@@ -1,5 +1,6 @@
 //! Pieces both binaries need, kept out of `main.rs` so they are tested once.
 
+pub mod coordinated;
 mod lists_config;
 pub use lists_config::ListsSection;
 

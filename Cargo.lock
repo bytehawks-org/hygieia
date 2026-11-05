@@ -1090,14 +1090,17 @@ name = "hygeia-runtime"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "async-trait",
  "ed25519-dalek",
  "getrandom 0.3.4",
  "hygeia-api",
  "hygeia-core",
  "hygeia-dns",
  "hygeia-lists",
+ "hygeia-store",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tokio",
  "tracing",
 ]

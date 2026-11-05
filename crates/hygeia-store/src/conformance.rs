@@ -160,6 +160,45 @@ pub async fn run(st: &dyn Store, a: (&str, &str, &str), b: (&str, &str)) {
     );
     st.ping().await.unwrap();
 
+    // --- leases: exclusive until expiry, renewable by the holder, taken over after expiry ---
+    assert!(st.try_lease("conf", "a", 60, 1000).await.unwrap());
+    assert!(
+        !st.try_lease("conf", "b", 60, 1010).await.unwrap(),
+        "held by a"
+    );
+    assert!(
+        st.try_lease("conf", "a", 60, 1050).await.unwrap(),
+        "holder renews"
+    );
+    assert!(
+        !st.try_lease("conf", "b", 60, 1100).await.unwrap(),
+        "renewed until 1110"
+    );
+    assert!(
+        st.try_lease("conf", "b", 60, 1111).await.unwrap(),
+        "expired: taken over"
+    );
+    assert!(!st.try_lease("conf", "a", 60, 1120).await.unwrap());
+
+    // --- shared artefacts ---
+    assert!(st.shared_index("conf:").await.unwrap().is_empty());
+    st.put_shared("conf:x", "h1", b"one").await.unwrap();
+    st.put_shared("conf:y", "h2", b"two").await.unwrap();
+    st.put_shared("other:z", "h3", b"3").await.unwrap();
+    st.put_shared("conf:x", "h1b", b"uno").await.unwrap();
+    assert_eq!(
+        st.shared_index("conf:").await.unwrap(),
+        vec![
+            ("conf:x".to_string(), "h1b".to_string()),
+            ("conf:y".to_string(), "h2".to_string())
+        ]
+    );
+    assert_eq!(
+        st.get_shared("conf:x").await.unwrap(),
+        Some(("h1b".to_string(), b"uno".to_vec()))
+    );
+    assert_eq!(st.get_shared("nope").await.unwrap(), None);
+
     // --- audit: one chain per tenant ---
     for n in 0..5 {
         st.append_audit(draft(ta, n)).await.unwrap();
