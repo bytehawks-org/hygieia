@@ -141,6 +141,9 @@ pub struct CloudDnsSection {
     pub burst: f64,
     /// When no bundle is available answer anyway instead of SERVFAIL.
     pub fail_open: bool,
+    /// Per source address, across transports.
+    pub ip_rate_per_sec: f64,
+    pub ip_burst: f64,
 }
 impl Default for CloudDnsSection {
     fn default() -> Self {
@@ -151,6 +154,8 @@ impl Default for CloudDnsSection {
             rate_per_sec: 50.0,
             burst: 100.0,
             fail_open: false,
+            ip_rate_per_sec: 100.0,
+            ip_burst: 200.0,
         }
     }
 }

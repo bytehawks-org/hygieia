@@ -90,6 +90,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         d.rate_per_sec = c.rate_per_sec;
         d.burst = c.burst;
         d.fail_open = c.fail_open;
+        d.ip_rate_per_sec = c.ip_rate_per_sec;
+        d.ip_burst = c.ip_burst;
         match std::env::var("HYGEIA_LOG_KEY") {
             Ok(h) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => {
                 for (i, c) in h.as_bytes().chunks(2).enumerate() {

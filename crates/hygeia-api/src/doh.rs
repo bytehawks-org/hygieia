@@ -41,6 +41,12 @@ pub struct DnsServiceConfig {
     /// Master secret for client pseudonyms (`HYGEIA_LOG_KEY`). Random per process if not set, which
     /// makes pseudonyms unlinkable across restarts (set it for stable daily pseudonyms).
     pub log_key: [u8; 32],
+    /// Per source address (all transports): sustained queries/s and burst.
+    pub ip_rate_per_sec: f64,
+    pub ip_burst: f64,
+    /// Failed authentications per source address: refill per second and burst.
+    pub ip_fail_rate: f64,
+    pub ip_fail_burst: f64,
 }
 
 impl DnsServiceConfig {
@@ -52,6 +58,10 @@ impl DnsServiceConfig {
             burst: 100.0,
             fail_open: false,
             upstream_timeout: Duration::from_secs(3),
+            ip_rate_per_sec: 100.0,
+            ip_burst: 200.0,
+            ip_fail_rate: 0.5,
+            ip_fail_burst: 20.0,
             log_key: {
                 let mut k = [0u8; 32];
                 getrandom::fill(&mut k).expect("OS randomness unavailable");
@@ -93,6 +103,8 @@ pub struct DnsService {
     auth: Mutex<AuthCache>,
     rules: Mutex<RulesCache>,
     buckets: Mutex<HashMap<String, Bucket>>,
+    ip_buckets: Mutex<HashMap<IpAddr, Bucket>>,
+    ip_fail: Mutex<HashMap<IpAddr, Bucket>>,
     settings: Mutex<HashMap<String, (DnsSettings, Instant)>>,
     log_tx: mpsc::Sender<(String, QueryLogEntry)>,
     log_rx: Mutex<Option<mpsc::Receiver<(String, QueryLogEntry)>>>,
@@ -143,6 +155,8 @@ impl DnsService {
             auth: Mutex::new(HashMap::new()),
             rules: Mutex::new(HashMap::new()),
             buckets: Mutex::new(HashMap::new()),
+            ip_buckets: Mutex::new(HashMap::new()),
+            ip_fail: Mutex::new(HashMap::new()),
             settings: Mutex::new(HashMap::new()),
             log_tx,
             log_rx: Mutex::new(Some(log_rx)),
@@ -180,23 +194,55 @@ impl DnsService {
     }
 
     fn allow(&self, id: &str) -> bool {
-        let mut b = self.buckets.lock().unwrap();
-        if b.len() >= MAX_CACHE {
-            b.clear();
+        take(
+            &self.buckets,
+            id.to_string(),
+            self.cfg.rate_per_sec,
+            self.cfg.burst,
+            1.0,
+        )
+    }
+
+    /// Source-address key: IPv6 clients share a /64 (a host can rotate its interface identifier).
+    fn ip_key(ip: IpAddr) -> IpAddr {
+        match ip {
+            IpAddr::V6(v) if v.to_ipv4_mapped().is_none() => {
+                let mut o = v.octets();
+                o[8..].fill(0);
+                IpAddr::V6(o.into())
+            }
+            IpAddr::V6(v) => IpAddr::V4(v.to_ipv4_mapped().unwrap()),
+            v4 => v4,
         }
-        let e = b.entry(id.to_string()).or_insert(Bucket {
-            tokens: self.cfg.burst,
-            at: Instant::now(),
-        });
-        let dt = e.at.elapsed().as_secs_f64();
-        e.at = Instant::now();
-        e.tokens = (e.tokens + dt * self.cfg.rate_per_sec).min(self.cfg.burst);
-        if e.tokens >= 1.0 {
-            e.tokens -= 1.0;
-            true
-        } else {
-            false
+    }
+
+    /// Per-source limits shared by every transport: a general query budget, and a much smaller one
+    /// that failed authentications draw from (slows token guessing from one address).
+    pub fn allow_source(&self, ip: IpAddr) -> bool {
+        let k = Self::ip_key(ip);
+        // a spent failure budget blocks the source until it refills, whatever token it presents
+        if self.ip_fail.lock().unwrap().get(&k).is_some_and(|b| {
+            b.tokens < 1.0 && b.at.elapsed().as_secs_f64() * self.cfg.ip_fail_rate + b.tokens < 1.0
+        }) {
+            return false;
         }
+        take(
+            &self.ip_buckets,
+            k,
+            self.cfg.ip_rate_per_sec,
+            self.cfg.ip_burst,
+            1.0,
+        )
+    }
+
+    fn note_auth_failure(&self, ip: IpAddr) {
+        take(
+            &self.ip_fail,
+            Self::ip_key(ip),
+            self.cfg.ip_fail_rate,
+            self.cfg.ip_fail_burst,
+            1.0,
+        );
     }
 
     async fn ruleset(&self, st: &AppState, tenant: &str, group: &str) -> Option<Arc<Ruleset>> {
@@ -321,8 +367,17 @@ impl DnsService {
         packet: &[u8],
         client: Option<IpAddr>,
     ) -> Result<Vec<u8>, DohError> {
+        if let Some(ip) = client
+            && !self.allow_source(ip)
+        {
+            self.counters.rate_limited.fetch_add(1, Ordering::Relaxed);
+            return Err(DohError::RateLimited);
+        }
         let Some(tok) = self.token(st, secret).await else {
             self.counters.auth_failures.fetch_add(1, Ordering::Relaxed);
+            if let Some(ip) = client {
+                self.note_auth_failure(ip);
+            }
             return Err(DohError::NotFound);
         };
         if packet.is_empty() || packet.len() > MAX_QUERY {
@@ -437,6 +492,33 @@ impl DnsService {
             }
         }
         Ok((reply, outcome))
+    }
+}
+
+/// Take `cost` tokens from the bucket of `key` (refilled at `rate`/s up to `burst`).
+fn take<K: std::hash::Hash + Eq>(
+    map: &Mutex<HashMap<K, Bucket>>,
+    key: K,
+    rate: f64,
+    burst: f64,
+    cost: f64,
+) -> bool {
+    let mut b = map.lock().unwrap();
+    if b.len() >= MAX_CACHE {
+        b.clear();
+    }
+    let e = b.entry(key).or_insert(Bucket {
+        tokens: burst,
+        at: Instant::now(),
+    });
+    let dt = e.at.elapsed().as_secs_f64();
+    e.at = Instant::now();
+    e.tokens = (e.tokens + dt * rate).min(burst);
+    if e.tokens >= cost {
+        e.tokens -= cost;
+        true
+    } else {
+        false
     }
 }
 

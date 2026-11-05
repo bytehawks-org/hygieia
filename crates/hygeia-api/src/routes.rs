@@ -2929,4 +2929,73 @@ mod tests {
         assert!(t.contains("hygeia_dns_resolve_seconds_bucket{le=\"+Inf\"} 2"));
         assert!(!t.contains(&tok), "no credential in metrics");
     }
+
+    #[tokio::test]
+    async fn per_source_limits_and_failed_auth_throttle() {
+        let upstream = fake_upstream().await;
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        store.bootstrap_default().await.unwrap();
+        let mut cfg = crate::doh::DnsServiceConfig::new(upstream);
+        cfg.ip_rate_per_sec = 0.0001;
+        cfg.ip_burst = 6.0;
+        cfg.ip_fail_rate = 0.0001;
+        cfg.ip_fail_burst = 3.0;
+        let mut state = AppState::new(
+            store,
+            SigningKey::from_bytes(&[1u8; 32]),
+            AuthConfig {
+                break_glass: Some(BreakGlass::new(ADMIN, None).unwrap()),
+                ..Default::default()
+            },
+        );
+        state.dns = Some(Arc::new(crate::doh::DnsService::new(cfg)));
+        let app = router(Arc::new(state));
+        let (_, _, b) = call(
+            &app,
+            "POST",
+            "/v1/admin/dns-tokens",
+            Some(ADMIN),
+            Some(json!({"name": "t"})),
+        )
+        .await;
+        let tok = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let q = dns_query("example.org");
+
+        // an address guessing tokens: three failures spend its failure budget, then even a valid token is refused
+        for _ in 0..3 {
+            assert_eq!(
+                doh_from(&app, "hyg_dns_guess", &q, "203.0.113.50:1", None).await,
+                StatusCode::NOT_FOUND
+            );
+        }
+        assert_eq!(
+            doh_from(&app, &tok, &q, "203.0.113.50:1", None).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        // other addresses are unaffected
+        assert_eq!(
+            doh_from(&app, &tok, &q, "203.0.113.51:1", None).await,
+            StatusCode::OK
+        );
+
+        // general per-source budget: burst of 6, then 429; IPv6 clients share their /64
+        for _ in 0..6 {
+            assert_eq!(
+                doh_from(&app, &tok, &q, "[2001:db8:1:2::1]:1", None).await,
+                StatusCode::OK
+            );
+        }
+        assert_eq!(
+            doh_from(&app, &tok, &q, "[2001:db8:1:2::abcd]:1", None).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            doh_from(&app, &tok, &q, "[2001:db8:1:3::1]:1", None).await,
+            StatusCode::OK,
+            "another /64 has its own budget"
+        );
+    }
 }
