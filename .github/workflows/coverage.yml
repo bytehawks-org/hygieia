@@ -21,7 +21,7 @@ jobs:
       - run: cargo llvm-cov report --lcov --output-path lcov.info
       - run: |
           { echo '### Coverage (lines)'; echo '```'; tail -n 30 coverage.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: |
