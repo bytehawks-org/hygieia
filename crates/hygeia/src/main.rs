@@ -44,6 +44,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let tls_source = if cfg.tls.cert.is_empty() {
+        None
+    } else {
+        let t = hygeia_api::tls::TlsSource::load(
+            std::path::Path::new(&cfg.tls.cert),
+            std::path::Path::new(&cfg.tls.key),
+            &["h2", "http/1.1"],
+        )
+        .map_err(|e| format!("[tls]: {e}"))?;
+        t.spawn_watcher();
+        Some(t)
+    };
+
     // HYGEIA_DATABASE_URL: runtime role (non-owner, subject to RLS).
     // HYGEIA_MIGRATE_URL: schema owner; when set, migrations run at startup.
     let store: Arc<dyn Store> = match std::env::var("HYGEIA_DATABASE_URL") {
@@ -169,29 +182,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => hygeia_api::router(state),
     };
+    let app = if cfg.api.access_log {
+        app.layer(axum::middleware::from_fn(
+            hygeia_api::accesslog::log_requests,
+        ))
+    } else {
+        app
+    };
+    if cfg.api.tls {
+        let tls = tls_source.ok_or("api.tls = true needs [tls] cert and key")?;
+        let app = app.layer(axum::middleware::map_response(
+            |mut r: axum::response::Response| async move {
+                r.headers_mut().insert(
+                    "strict-transport-security",
+                    axum::http::HeaderValue::from_static("max-age=31536000"),
+                );
+                r
+            },
+        ));
+        tracing::info!("api serving HTTPS");
+        hygeia_api::tls::serve_tls(listener, app, tls, shutdown_signal()).await?;
+        return Ok(());
+    }
     axum_serve(listener, app).await
+}
+
+/// SIGTERM (orchestrators, systemd) and Ctrl-C both drain in-flight requests.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 async fn axum_serve(
     l: tokio::net::TcpListener,
     app: hygeia_api::Router,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    hygeia_api::serve(l, app, async {
-        // SIGTERM (orchestrators, systemd) and Ctrl-C both drain in-flight requests.
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{SignalKind, signal};
-            if let Ok(mut term) = signal(SignalKind::terminate()) {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = term.recv() => {}
-                }
-                return;
-            }
-        }
-        let _ = tokio::signal::ctrl_c().await;
-    })
-    .await?;
+    hygeia_api::serve(l, app, shutdown_signal()).await?;
     Ok(())
 }
 

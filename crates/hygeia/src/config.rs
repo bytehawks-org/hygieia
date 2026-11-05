@@ -10,6 +10,7 @@ pub struct Config {
     pub auth: AuthSection,
     pub dns: DnsSection,
     pub cloud_dns: CloudDnsSection,
+    pub tls: TlsSection,
     pub lists: ListsSection,
 }
 
@@ -93,6 +94,11 @@ pub struct ApiConfig {
     pub web_dir: String,
     /// Reverse proxies whose `X-Forwarded-For` is trusted for the client address (CIDRs).
     pub trusted_proxies: Vec<String>,
+    /// Serve the API and UI over HTTPS using `[tls]` (HSTS is then sent). Off: plain HTTP, put a
+    /// TLS-terminating proxy in front.
+    pub tls: bool,
+    /// Log one line per request with credentials redacted from the path.
+    pub access_log: bool,
 }
 impl Default for ApiConfig {
     fn default() -> Self {
@@ -100,6 +106,8 @@ impl Default for ApiConfig {
             listen: "127.0.0.1:8080".into(),
             web_dir: String::new(),
             trusted_proxies: Vec::new(),
+            tls: false,
+            access_log: false,
         }
     }
 }
@@ -123,6 +131,15 @@ impl Default for DnsSection {
             block_mode: "nxdomain".into(),
         }
     }
+}
+
+/// Certificate and key (PEM) for HTTPS and DNS-over-TLS. The files are re-read when they change
+/// (certbot, cert-manager), no restart needed.
+#[derive(Debug, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct TlsSection {
+    pub cert: String,
+    pub key: String,
 }
 
 /// Cloud DNS over HTTPS at `/dns-query/<token>` (SaaS). Off by default. The API speaks plain HTTP:

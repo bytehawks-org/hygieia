@@ -3310,7 +3310,6 @@ mod tests {
             rcode(
                 svc.resolve_from_network(&st, ip("203.0.113.77"), "udp", &blocked)
                     .await
-                    .map_err(|e| e)
             ),
             Err(DohError::NotFound)
         );
