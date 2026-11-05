@@ -61,6 +61,10 @@ pub struct Paths {
     pub state: PathBuf,
     pub signing_key: PathBuf,
     pub owner_token: PathBuf,
+    /// Connected mode: node identity + known browser credentials (hashes only).
+    pub node_state: PathBuf,
+    /// Connected mode: verified bundles cached for offline operation.
+    pub bundle_cache: PathBuf,
 }
 
 impl Paths {
@@ -70,6 +74,8 @@ impl Paths {
             state: dir.join("state.json"),
             signing_key: dir.join("signing.key"),
             owner_token: dir.join("owner.token"),
+            node_state: dir.join("connected.json"),
+            bundle_cache: dir.join("bundles"),
             dir,
         }
     }

@@ -5,6 +5,7 @@
 //! and admin UI as the server, a Host/Origin guard for the local port, and an opt-in DNS listener.
 
 pub mod config;
+pub mod connected;
 pub mod guard;
 pub mod paths;
 
@@ -19,7 +20,7 @@ use hygeia_store::{FileStore, Store};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::config::{Config, DnsMode};
+use crate::config::{Config, DnsMode, Mode};
 use crate::paths::Paths;
 
 type BoxErr = Box<dyn std::error::Error + Send + Sync>;
@@ -27,10 +28,11 @@ type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 pub struct RunningNode {
     pub http_addr: SocketAddr,
     pub dns_addr: Option<SocketAddr>,
-    pub state: Arc<AppState>,
+    /// Embedded control plane (standalone mode only).
+    pub state: Option<Arc<AppState>>,
     /// Whether an admin UI was found and is being served.
     pub ui: bool,
-    store: Arc<FileStore>,
+    store: Option<Arc<FileStore>>,
     shutdown: Option<oneshot::Sender<()>>,
     server: JoinHandle<std::io::Result<()>>,
 }
@@ -42,7 +44,9 @@ impl RunningNode {
             let _ = tx.send(());
         }
         self.server.await??;
-        self.store.flush()?;
+        if let Some(s) = &self.store {
+            s.flush()?;
+        }
         Ok(())
     }
 
@@ -126,6 +130,10 @@ fn private_dir(dir: &Path) -> std::io::Result<()> {
 pub async fn start(cfg: Config, paths: Paths) -> Result<RunningNode, BoxErr> {
     cfg.validate()?;
     private_dir(&paths.dir).map_err(|e| format!("{}: {e}", paths.dir.display()))?;
+
+    if cfg.mode == Mode::Connected {
+        return start_connected(cfg, paths).await;
+    }
 
     let (signing_key, created) = hygeia_runtime::load_or_create_signing_key(&paths.signing_key)?;
     if created {
@@ -219,9 +227,43 @@ pub async fn start(cfg: Config, paths: Paths) -> Result<RunningNode, BoxErr> {
     Ok(RunningNode {
         http_addr,
         dns_addr,
-        state,
+        state: Some(state),
         ui,
-        store,
+        store: Some(store),
+        shutdown: Some(tx),
+        server,
+    })
+}
+
+/// Connected mode: no embedded control plane, no signing key, no lists. The node relays to the
+/// central server and serves verified, cached bundles (see `connected.rs`).
+async fn start_connected(cfg: Config, paths: Paths) -> Result<RunningNode, BoxErr> {
+    let (owner, created) = hygeia_runtime::load_or_create_secret(&paths.owner_token, || {
+        format!("hyg_own_{}", hygeia_runtime::rand_hex(24))
+    })
+    .map_err(|e| format!("{}: {e}", paths.owner_token.display()))?;
+    if created {
+        tracing::info!(file = %paths.owner_token.display(), "generated the local credential (node status)");
+    }
+    let conn = connected::Connected::new(&cfg.upstream, &paths, owner)?;
+    let listener = tokio::net::TcpListener::bind(&cfg.http.listen)
+        .await
+        .map_err(|e| format!("http.listen {}: {e}", cfg.http.listen))?;
+    let http_addr = listener.local_addr()?;
+    let guard = guard::HostGuard::new(http_addr, &cfg.http.allowed_hosts);
+    let app = connected::router(conn.clone())
+        .layer(axum::middleware::from_fn_with_state(guard, guard::enforce));
+    let (tx, rx) = oneshot::channel::<()>();
+    let server = tokio::spawn(hygeia_api::serve(listener, app, async move {
+        let _ = rx.await;
+    }));
+    tracing::info!(http = %http_addr, node = %conn.node_id(), upstream = %cfg.upstream.url, "node listening (connected)");
+    Ok(RunningNode {
+        http_addr,
+        dns_addr: None,
+        state: None,
+        ui: false,
+        store: None,
         shutdown: Some(tx),
         server,
     })

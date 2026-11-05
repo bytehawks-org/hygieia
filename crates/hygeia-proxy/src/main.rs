@@ -74,7 +74,14 @@ async fn real_main(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sy
             node.stop().await?;
         }
         Cmd::Token => println!("{}", read_owner_token(&p)?),
-        Cmd::Pubkey => println!("{}", read_public_key(&p)?),
+        Cmd::Pubkey => {
+            let cfg = load_config(&cfg_path)?;
+            if cfg.mode == hygeia_proxy::config::Mode::Connected {
+                println!("{}", cfg.upstream.public_key.trim());
+            } else {
+                println!("{}", read_public_key(&p)?);
+            }
+        }
         Cmd::CheckConfig => {
             load_config(&cfg_path)?;
             println!(
@@ -107,6 +114,18 @@ async fn real_main(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sy
                     "not created yet"
                 }
             );
+            if cfg.mode == hygeia_proxy::config::Mode::Connected {
+                println!("mode:         connected to {}", cfg.upstream.url);
+                println!(
+                    "listen:       http://{}/ (extension feed; no local UI)",
+                    cfg.http.listen
+                );
+                println!(
+                    "public key:   {} (central, pinned)",
+                    cfg.upstream.public_key.trim()
+                );
+                return Ok(());
+            }
             println!("UI / API:     http://{}/", cfg.http.listen);
             println!(
                 "DNS:          {:?}{}",
@@ -124,6 +143,9 @@ async fn real_main(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sy
         }
         Cmd::Open => {
             let cfg = load_config(&cfg_path)?;
+            if cfg.mode == hygeia_proxy::config::Mode::Connected {
+                return Err("connected mode has no local UI: administer the central server".into());
+            }
             let token = read_owner_token(&p)?;
             open_browser(&p, &cfg.http.listen, &token).await?;
         }

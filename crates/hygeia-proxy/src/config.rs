@@ -9,6 +9,7 @@ pub use hygeia_runtime::ListsSection;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub mode: Mode,
+    pub upstream: UpstreamSection,
     pub http: HttpSection,
     pub dns: DnsSection,
     pub lists: ListsSection,
@@ -20,8 +21,50 @@ pub enum Mode {
     /// Own rules, own lists, own signing key.
     #[default]
     Standalone,
-    /// Endpoint of a central server (not implemented in this build).
+    /// Endpoint of a central server: relays enrolments, serves cached verified bundles.
     Connected,
+}
+
+/// Central server (connected mode only).
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpstreamSection {
+    /// Base URL of the central server, e.g. `https://hygeia.example.com`.
+    pub url: String,
+    /// Central bundle-signing public key (64 hex chars). Pinned: the node never trusts a key
+    /// learned from the network.
+    pub public_key: String,
+    /// Permit `http://` (tests/labs only; bundles stay signed, enrolment secrets would not be
+    /// protected in transit).
+    pub allow_insecure_http: bool,
+    pub timeout_secs: u64,
+}
+
+impl Default for UpstreamSection {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            public_key: String::new(),
+            allow_insecure_http: false,
+            timeout_secs: 10,
+        }
+    }
+}
+
+impl UpstreamSection {
+    pub fn verifying_key(&self) -> Result<ed25519_dalek::VerifyingKey, String> {
+        let h = self.public_key.trim();
+        if h.len() != 64 || !h.is_ascii() {
+            return Err("upstream.public_key must be 64 hex characters".into());
+        }
+        let mut raw = [0u8; 32];
+        for (i, c) in h.as_bytes().chunks(2).enumerate() {
+            raw[i] = u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16)
+                .map_err(|_| "upstream.public_key is not hex".to_string())?;
+        }
+        ed25519_dalek::VerifyingKey::from_bytes(&raw)
+            .map_err(|e| format!("upstream.public_key: {e}"))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,9 +128,22 @@ impl Config {
     /// Cross-field checks that serde cannot express.
     pub fn validate(&self) -> Result<(), String> {
         if self.mode == Mode::Connected {
-            return Err(
-                "mode = \"connected\" is not implemented in this build (standalone only)".into(),
-            );
+            let u = &self.upstream;
+            if u.url.is_empty() {
+                return Err("mode = \"connected\" requires upstream.url".into());
+            }
+            if !(u.url.starts_with("https://")
+                || u.allow_insecure_http && u.url.starts_with("http://"))
+            {
+                return Err(
+                    "upstream.url must be https:// (upstream.allow_insecure_http only for labs)"
+                        .into(),
+                );
+            }
+            u.verifying_key()?;
+            if self.dns.mode == DnsMode::Local {
+                return Err("dns.mode = \"local\" is not available in connected mode yet".into());
+            }
         }
         let addr: std::net::SocketAddr = self
             .http
@@ -139,9 +195,47 @@ mod tests {
     }
 
     #[test]
-    fn connected_and_unknown_keys_are_rejected() {
+    fn connected_needs_https_upstream_and_pinned_key_and_unknown_keys_are_rejected() {
         let c: Config = toml::from_str("mode = \"connected\"").unwrap();
-        assert!(c.validate().is_err());
+        assert!(c.validate().unwrap_err().contains("upstream.url"));
+        let key: String = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32])
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let ok = |extra: &str| {
+            let c: Config =
+                toml::from_str(&format!("mode = \"connected\"\n[upstream]\n{extra}")).unwrap();
+            c.validate()
+        };
+        assert!(
+            ok(&format!(
+                "url = \"http://c.example.com\"\npublic_key = \"{key}\""
+            ))
+            .unwrap_err()
+            .contains("https")
+        );
+        assert!(
+            ok("url = \"https://c.example.com\"")
+                .unwrap_err()
+                .contains("public_key")
+        );
+        assert!(
+            ok(&format!(
+                "url = \"https://c.example.com\"\npublic_key = \"{}\"",
+                "zz".repeat(32)
+            ))
+            .is_err()
+        );
+        ok(&format!(
+            "url = \"https://c.example.com\"\npublic_key = \"{key}\""
+        ))
+        .unwrap();
+        ok(&format!(
+            "url = \"http://127.0.0.1:1\"\npublic_key = \"{key}\"\nallow_insecure_http = true"
+        ))
+        .unwrap();
         assert!(toml::from_str::<Config>("[bogus]").is_err());
         assert!(toml::from_str::<Config>("[dns]\nmode = \"cloud\"").is_err());
     }

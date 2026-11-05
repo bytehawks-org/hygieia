@@ -56,9 +56,24 @@ Cloud forward exists for operating systems or networks that cannot use DoH/DoT n
 
 The SaaS DNS service is a first-class feature of the central server, not an afterthought: its constraints (no open resolver, tenant identification, privacy, data residency) are in `docs/architecture/dns-service.md`.
 
-## Credentials (connected mode)
+## Connected mode (implemented)
 
-New credential kind `hyg_node_…` (same pattern as `hyg_dev_…`: 256-bit secret, SHA-256 stored, prefix for secret scanners, per-node revocation): issued from an enrolment token with `kind = node`, scoped to tenant + the policy groups the node may serve. A node can only fetch bundles of its groups. Relayed browser enrolments carry `X-Hygeia-Node` so the server records which node vouched for the device.
+```toml
+mode = "connected"
+[upstream]
+url = "https://hygeia.example.com"
+public_key = "<central signing key, 64 hex>"   # pinned, never learned from the network
+```
+
+**Decision: the node holds no credential of its own towards the central server** (this replaces the earlier `hyg_node_` idea). Trust is per browser device: each device is enrolled centrally (so it appears under central RBAC and can be revoked there) and the node relays on its behalf.
+
+- `POST /v1/enroll` is relayed unchanged with `X-Hygeia-Node: <node id>`; the server records it in the audit event (`via_node`, informational, unauthenticated).
+- `GET /v1/bundle` is relayed with the browser's own bearer secret. A `200` is verified against the pinned key, checked against rollback/replay (same tenant+group, lower version or same version with other bytes is refused and the cached bundle is served), cached on disk and served **unchanged**; the extension pins the central key. `304` and `If-None-Match` pass through.
+- Revocation: a `401` from the central server is passed on and the device is forgotten by the node immediately.
+- Central unreachable: a device the central server accepted before (known by SHA-256 of its secret, in `connected.json`) gets the cached bundle, re-verified on every read, flagged `X-Hygeia-Stale: 1`. Unknown credentials and enrolment get `502`. A tampered or unverifiable cache is never served.
+- `GET /v1/node/status` (local credential) shows node id, upstream and last contact. No admin API, no UI, no lists, no signing key on the node.
+
+Not yet: local DNS in connected mode (rejected by config validation), audit/telemetry forwarding, pause-blocking, central-side per-node revocation. A compromised node can see the secrets of the devices that pass through it, and can withhold updates, but cannot forge bundles.
 
 ## Central redundancy (several instances)
 

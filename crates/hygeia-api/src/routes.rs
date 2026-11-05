@@ -210,7 +210,18 @@ struct EnrollReq {
     device_info: String,
 }
 
-async fn enroll(State(st): S, Json(req): Json<EnrollReq>) -> Response {
+async fn enroll(State(st): S, headers: HeaderMap, Json(req): Json<EnrollReq>) -> Response {
+    // Informational only (not authenticated): which relay node vouched for this enrolment.
+    let via = headers
+        .get("x-hygeia-node")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| {
+            !v.is_empty()
+                && v.len() <= 64
+                && v.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+        .map(str::to_string);
     match st.store.enroll(&req.token, &req.device_info, now()).await {
         Ok((dev, secret)) => {
             st.record(
@@ -218,7 +229,7 @@ async fn enroll(State(st): S, Json(req): Json<EnrollReq>) -> Response {
                 &dev.id,
                 "device.enroll",
                 &dev.id,
-                Some(json!({"info": dev.info})),
+                Some(json!({"info": dev.info, "via_node": via})),
             )
             .await;
             Json(json!({"device_id": dev.id, "device_secret": secret})).into_response()
