@@ -1,0 +1,113 @@
+name: release
+# Publishes installable artefacts to a GitHub Release.
+#   tag push (v*)       -> release for that tag
+#   workflow_dispatch   -> draft release named after the given tag (created if missing)
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: cd web && npm ci && npm run build
+      - uses: actions/upload-artifact@v4
+        with: { name: web-out, path: web/out }
+
+  linux:
+    needs: web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with: { name: web-out, path: web/out }
+      - run: cargo build --release -p hygeia-proxy -p hygeia
+      - run: packaging/linux/build-deb.sh target/release/hygeia-proxy web/out dist
+      - name: Tarballs (static layout, any distro)
+        run: |
+          mkdir -p t/hygeia-proxy t/hygeia-server
+          cp target/release/hygeia-proxy t/hygeia-proxy/ && cp -r web/out t/hygeia-proxy/web
+          cp packaging/linux/hygeia-proxy.service packaging/linux/hygeia-proxy.toml t/hygeia-proxy/
+          cp target/release/hygeia t/hygeia-server/
+          tar -C t -czf dist/hygeia-proxy-linux-x86_64.tar.gz hygeia-proxy
+          tar -C t -czf dist/hygeia-server-linux-x86_64.tar.gz hygeia-server
+      - uses: actions/upload-artifact@v4
+        with: { name: linux, path: dist/* }
+
+  windows:
+    needs: web
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/setup-nasm@v1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with: { name: web-out, path: web/out }
+      - run: cargo build --release -p hygeia-proxy
+      - run: cargo build --release --manifest-path crates/hygeia-tray/Cargo.toml
+      - shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist/hygeia | Out-Null
+          Copy-Item target/release/hygeia-proxy.exe dist/hygeia/
+          Copy-Item crates/hygeia-tray/target/release/hygeia-tray.exe dist/hygeia/
+          Copy-Item web/out dist/hygeia/web -Recurse
+          Copy-Item packaging/windows/*.ps1 dist/hygeia/
+          Compress-Archive dist/hygeia dist/hygeia-proxy-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with: { name: windows, path: dist/hygeia-proxy-windows-x64.zip }
+
+  extensions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: wasm32-unknown-unknown }
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with: { tool: 'wasm-bindgen-cli@0.2.130' }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: ./extension/build.sh
+      - run: |
+          for b in chrome firefox; do
+            node extension/package.mjs $b
+            (cd extension/dist/$b && zip -qr ../../../hygeia-blocker-$b.zip .)
+          done
+      - uses: actions/upload-artifact@v4
+        with: { name: extensions, path: hygeia-blocker-*.zip }
+
+  publish:
+    needs: [linux, windows, extensions]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: out, merge-multiple: true }
+      - run: ls -lh out && cd out && sha256sum * > SHA256SUMS
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/* --clobber
+          else
+            gh release create "$TAG" out/* --title "$TAG" --draft \
+              --notes "Unsigned preview builds. Windows artefacts have not been verified on a real machine. Chrome/Firefox extension zips are unsigned (load unpacked / temporary add-on)."
+          fi

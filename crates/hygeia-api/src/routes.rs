@@ -1,3 +1,6 @@
+// Handlers gate with `Result<_, Response>`: the error *is* the HTTP response to send back.
+#![allow(clippy::result_large_err)]
+
 use std::sync::Arc;
 use std::time::Duration;
 
