@@ -16,6 +16,9 @@ pub struct Config {
 pub struct ListsSection {
     pub enabled: bool,
     pub refresh_hours: u64,
+    /// Allow plain-http list URLs (lab / trusted internal mirrors only: an attacker on
+    /// the path could poison list content before it is signed into a bundle).
+    pub allow_insecure_http: bool,
     /// Catalogue ids to use. Unset = catalogue entries marked `default_enabled`.
     pub sources: Option<Vec<String>>,
     /// Extra sources; license + attribution are mandatory.
@@ -26,6 +29,7 @@ impl Default for ListsSection {
         Self {
             enabled: true,
             refresh_hours: 12,
+            allow_insecure_http: false,
             sources: None,
             custom: Vec::new(),
         }

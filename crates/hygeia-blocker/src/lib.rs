@@ -1,41 +1,13 @@
-//! Browser extension engine — SKELETON.
+//! Browser extension engine.
 //!
-//! Compiles to `wasm32` (hygeia-core is I/O free). Planned: wasm-bindgen
-//! exports, DNR subset compiler for Chrome MV3 (rules ordered by hit
-//! frequency), full engine for Firefox `webRequest`, cosmetic filtering and
-//! packaged scriptlets (MV3 forbids remote code: bundles carry only data),
-//! enrollment + signed-bundle pull with ETag, per-tenant fail-open/closed.
+//! [`Engine`] is plain Rust (unit-tested natively); `wasm.rs` exposes it to
+//! JavaScript through wasm-bindgen on `wasm32`. The extension never trusts the
+//! network: a bundle is verified against a pinned ed25519 key BEFORE decoding,
+//! and a bundle older than the one already installed is refused (rollback
+//! protection).
 
-use hygeia_core::{Ruleset, Verdict};
+mod engine;
+pub use engine::{DnrPlan, DnrRule, Engine, EngineError, url_host};
 
-/// Extract the host from an absolute `http(s)` URL (no userinfo/port/path).
-pub fn url_host(url: &str) -> Option<&str> {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))?;
-    let auth = rest.split(['/', '?', '#']).next()?;
-    let auth = auth.rsplit_once('@').map_or(auth, |(_, h)| h);
-    if let Some(v6) = auth.strip_prefix('[') {
-        return v6.split(']').next();
-    }
-    Some(auth.rsplit_once(':').map_or(auth, |(h, _)| h))
-}
-
-pub fn check_url(rs: &Ruleset, url: &str) -> Option<Verdict> {
-    Some(rs.evaluate(url_host(url)?))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn hosts() {
-        assert_eq!(
-            url_host("https://u:p@Ads.Example.com:8443/a?b#c"),
-            Some("Ads.Example.com")
-        );
-        assert_eq!(url_host("http://a.test"), Some("a.test"));
-        assert_eq!(url_host("ftp://a.test"), None);
-    }
-}
+#[cfg(target_arch = "wasm32")]
+mod wasm;

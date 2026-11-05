@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Hygieia Blocker</title>
+<style>
+  body { font: 14px system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+  label { display: block; margin-top: 1rem; font-weight: 600; }
+  input { width: 100%; padding: .4rem; box-sizing: border-box; font-family: ui-monospace, monospace; }
+  button { margin: 1rem .5rem 0 0; padding: .4rem .9rem; }
+  pre { background: #8881; padding: .75rem; overflow: auto; }
+  .hint { font-weight: 400; color: #666; }
+</style>
+<h1>Hygieia Blocker</h1>
+<label>Server URL <input id="server" placeholder="https://hygeia.example.com"></label>
+<label>Enrollment token <input id="token" placeholder="hyg_enr_..." autocomplete="off"></label>
+<label>Server public key (ed25519, hex)
+  <span class="hint">Pin it from a trusted channel. "Fetch" trusts the server on first use.</span>
+  <input id="pubkey" placeholder="64 hex characters"></label>
+<button id="fetchkey">Fetch key from server (TOFU)</button>
+<button id="enroll">Enroll</button>
+<button id="sync">Sync now</button>
+<h2>Status</h2>
+<pre id="out">...</pre>
+<script src="options.js"></script>

@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Hygieia Blocker",
+  "version": "0.1.0",
+  "description": "Content blocker driven by signed Hygeia bundles (standalone engine, WASM).",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "unlimitedStorage", "declarativeNetRequest", "scripting", "webNavigation", "alarms"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true
+    }
+  ],
+  "options_page": "options.html",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}

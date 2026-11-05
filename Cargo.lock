@@ -897,7 +897,12 @@ dependencies = [
 name = "hygeia-blocker"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "hygeia-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "wasm-bindgen",
 ]
 
 [[package]]

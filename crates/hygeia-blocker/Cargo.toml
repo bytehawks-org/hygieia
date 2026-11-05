@@ -1,9 +1,22 @@
 [package]
 name = "hygeia-blocker"
-description = "Browser extension engine bindings (WASM-ready, skeleton)"
+description = "Browser extension engine: verifies and queries signed Hygeia bundles (native + wasm32 via wasm-bindgen)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 hygeia-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ed25519-dalek.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+
+[dev-dependencies]
+ed25519-dalek.workspace = true

@@ -124,7 +124,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if cfg.lists.enabled {
         let sources = cfg.lists.resolve()?;
-        let manager = Manager::new(sources, Arc::new(HttpFetcher::new(64 << 20, false)?), false);
+        let insecure = cfg.lists.allow_insecure_http;
+        if insecure {
+            tracing::warn!(
+                "lists.allow_insecure_http is on: list downloads are not protected in transit"
+            );
+        }
+        let manager = Manager::new(
+            sources,
+            Arc::new(HttpFetcher::new(64 << 20, insecure)?),
+            insecure,
+        );
         let interval = Duration::from_secs(cfg.lists.refresh_hours.max(1) * 3600);
         let st = state.clone();
         tokio::spawn(async move {
