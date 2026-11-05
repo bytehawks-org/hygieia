@@ -117,7 +117,8 @@ pub async fn serve_udp(
     }
 }
 
-fn servfail(packet: &[u8]) -> Vec<u8> {
+/// SERVFAIL reply for `packet` (empty if it cannot be parsed).
+pub fn servfail(packet: &[u8]) -> Vec<u8> {
     Message::from_vec(packet)
         .ok()
         .and_then(|r| {
@@ -129,7 +130,16 @@ fn servfail(packet: &[u8]) -> Vec<u8> {
 }
 
 async fn forward(packet: &[u8], cfg: &DnsConfig) -> std::io::Result<Vec<u8>> {
-    let bind: SocketAddr = if cfg.upstream.is_ipv4() {
+    forward_udp(packet, cfg.upstream, cfg.upstream_timeout).await
+}
+
+/// Send one query to a plain-UDP upstream resolver and wait for the reply.
+pub async fn forward_udp(
+    packet: &[u8],
+    upstream: SocketAddr,
+    timeout: Duration,
+) -> std::io::Result<Vec<u8>> {
+    let bind: SocketAddr = if upstream.is_ipv4() {
         "0.0.0.0:0"
     } else {
         "[::]:0"
@@ -137,10 +147,10 @@ async fn forward(packet: &[u8], cfg: &DnsConfig) -> std::io::Result<Vec<u8>> {
     .parse()
     .unwrap();
     let s = UdpSocket::bind(bind).await?;
-    s.connect(cfg.upstream).await?;
+    s.connect(upstream).await?;
     s.send(packet).await?;
     let mut buf = vec![0u8; 4096];
-    let n = tokio::time::timeout(cfg.upstream_timeout, s.recv(&mut buf))
+    let n = tokio::time::timeout(timeout, s.recv(&mut buf))
         .await
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "upstream timeout"))??;
     buf.truncate(n);

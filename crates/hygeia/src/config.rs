@@ -9,6 +9,7 @@ pub struct Config {
     pub api: ApiConfig,
     pub auth: AuthSection,
     pub dns: DnsSection,
+    pub cloud_dns: CloudDnsSection,
     pub lists: ListsSection,
 }
 
@@ -117,6 +118,36 @@ impl Default for DnsSection {
             listen: "127.0.0.1:5353".into(),
             upstream: vec!["9.9.9.9:53".into()],
             block_mode: "nxdomain".into(),
+        }
+    }
+}
+
+/// Cloud DNS over HTTPS at `/dns-query/<token>` (SaaS). Off by default. The API speaks plain HTTP:
+/// put a TLS-terminating reverse proxy in front and redact the request path in its access logs
+/// (the path is a credential).
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CloudDnsSection {
+    pub enabled: bool,
+    /// Plain-UDP recursive resolver (`ip:port`) for allowed queries. DoT/DoH upstream: not yet.
+    pub upstream: String,
+    /// `nxdomain` | `null_ip`
+    pub block_mode: String,
+    /// Per token.
+    pub rate_per_sec: f64,
+    pub burst: f64,
+    /// When no bundle is available answer anyway instead of SERVFAIL.
+    pub fail_open: bool,
+}
+impl Default for CloudDnsSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            upstream: "9.9.9.9:53".into(),
+            block_mode: "nxdomain".into(),
+            rate_per_sec: 50.0,
+            burst: 100.0,
+            fail_open: false,
         }
     }
 }

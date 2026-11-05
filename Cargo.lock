@@ -985,6 +985,7 @@ dependencies = [
  "http-body-util",
  "hygeia-audit",
  "hygeia-core",
+ "hygeia-dns",
  "hygeia-store",
  "jsonwebtoken",
  "reqwest",

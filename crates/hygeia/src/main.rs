@@ -63,6 +63,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (auth, public) = build_auth(&cfg, &store).await?;
     let mut state = AppState::new(store, signing_key, auth);
     state.public = public;
+    if cfg.cloud_dns.enabled {
+        let c = &cfg.cloud_dns;
+        let mut d = hygeia_api::doh::DnsServiceConfig::new(
+            c.upstream
+                .parse()
+                .map_err(|e| format!("cloud_dns.upstream {:?}: {e}", c.upstream))?,
+        );
+        d.block_mode = match c.block_mode.as_str() {
+            "null_ip" => hygeia_dns::BlockMode::NullIp,
+            _ => hygeia_dns::BlockMode::NxDomain,
+        };
+        d.rate_per_sec = c.rate_per_sec;
+        d.burst = c.burst;
+        d.fail_open = c.fail_open;
+        state.dns = Some(Arc::new(hygeia_api::doh::DnsService::new(d)));
+        tracing::info!(
+            "cloud DNS (DoH) enabled at /dns-query/<token>; terminate TLS in front and redact the path in logs"
+        );
+    }
     let state = Arc::new(state);
 
     // Data plane: DNS follows the control plane by pulling the signed bundle.

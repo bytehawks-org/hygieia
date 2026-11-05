@@ -72,6 +72,17 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(list_api_tokens).post(create_api_token),
         )
         .route("/v1/admin/api-tokens/{id}", delete(revoke_api_token))
+        .route(
+            "/v1/admin/dns-tokens",
+            get(list_dns_tokens).post(create_dns_token),
+        )
+        .route("/v1/admin/dns-tokens/{id}", delete(revoke_dns_token))
+        .route(
+            "/dns-query/{token}",
+            get(doh_get)
+                .post(doh_post)
+                .layer(axum::extract::DefaultBodyLimit::max(crate::doh::MAX_QUERY)),
+        )
         .route("/v1/admin/enrollment-tokens", post(create_token))
         .route("/v1/admin/devices", get(list_devices))
         .route("/v1/admin/devices/{id}", delete(revoke_device))
@@ -536,6 +547,150 @@ async fn revoke_api_token(
     st.record(&tenant, &p.actor(), "api-token.revoke", &id, None)
         .await;
     StatusCode::NO_CONTENT.into_response()
+}
+
+// ---------------------------------------------------------------- cloud DNS
+
+#[derive(Deserialize)]
+struct NewDnsToken {
+    tenant_id: Option<String>,
+    #[serde(default = "d_group")]
+    group_id: String,
+    name: String,
+    ttl_secs: Option<i64>,
+}
+
+async fn create_dns_token(State(st): S, h: HeaderMap, Json(r): Json<NewDnsToken>) -> Response {
+    let (p, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::ApiTokensManage,
+            r.tenant_id,
+            "dns-token.create"
+        )
+        .await
+    );
+    let expires = r.ttl_secs.map(|t| now().saturating_add(t));
+    let (t, secret) = ok_or!(
+        st.store
+            .create_dns_token(&tenant, &r.group_id, &r.name, expires)
+            .await
+    );
+    // The secret is a credential (it is the DoH path): NOT in the audit diff.
+    st.record(
+        &tenant,
+        &p.actor(),
+        "dns-token.create",
+        &t.id,
+        Some(json!({"after": t})),
+    )
+    .await;
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "id": t.id, "token": secret, "group_id": t.group_id,
+            "expires_at": t.expires_at, "doh_path": format!("/dns-query/{secret}"),
+        })),
+    )
+        .into_response()
+}
+
+async fn list_dns_tokens(State(st): S, h: HeaderMap, Query(q): Query<TenantQ>) -> Response {
+    let (_, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::ApiTokensManage,
+            q.tenant_id,
+            "dns-token.list"
+        )
+        .await
+    );
+    Json(ok_or!(st.store.list_dns_tokens(&tenant).await)).into_response()
+}
+
+async fn revoke_dns_token(
+    State(st): S,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<TenantQ>,
+) -> Response {
+    let (p, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::ApiTokensManage,
+            q.tenant_id,
+            "dns-token.revoke"
+        )
+        .await
+    );
+    ok_or!(st.store.revoke_dns_token(&tenant, &id).await);
+    if let Some(svc) = &st.dns {
+        svc.clear_auth_cache();
+    }
+    st.record(&tenant, &p.actor(), "dns-token.revoke", &id, None)
+        .await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+fn doh_response(r: Result<Vec<u8>, crate::doh::DohError>) -> Response {
+    use crate::doh::DohError;
+    match r {
+        Ok(b) => (
+            [
+                (header::CONTENT_TYPE, "application/dns-message"),
+                // the URL carries a credential: never cache shared
+                (header::CACHE_CONTROL, "private, no-store"),
+            ],
+            b,
+        )
+            .into_response(),
+        Err(DohError::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(DohError::RateLimited) => StatusCode::TOO_MANY_REQUESTS.into_response(),
+        Err(DohError::BadRequest) => StatusCode::BAD_REQUEST.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct DohQ {
+    dns: Option<String>,
+}
+
+async fn doh_get(State(st): S, Path(token): Path<String>, Query(q): Query<DohQ>) -> Response {
+    use base64::Engine;
+    let Some(svc) = st.dns.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(packet) = q.dns.and_then(|d| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(d)
+            .ok()
+    }) else {
+        // still authenticate first so garbage tokens and garbage queries look alike
+        return doh_response(svc.answer(&st, &token, &[]).await);
+    };
+    doh_response(svc.answer(&st, &token, &packet).await)
+}
+
+async fn doh_post(
+    State(st): S,
+    Path(token): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let Some(svc) = st.dns.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        != Some("application/dns-message")
+    {
+        return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+    }
+    doh_response(svc.answer(&st, &token, &body).await)
 }
 
 // ---------------------------------------------------------------- devices, enrollment
@@ -1969,5 +2124,201 @@ mod tests {
         // unchanged inputs: no new version, stable ETag
         let (_, h5, _) = call(&rb, "GET", "/v1/bundle", Some(&secret), None).await;
         assert_eq!(h3["etag"], h5["etag"]);
+    }
+
+    // ------------------------------------------------------------ cloud DNS (DoH)
+
+    fn dns_query(name: &str) -> Vec<u8> {
+        let mut q = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        for l in name.split('.') {
+            q.push(l.len() as u8);
+            q.extend_from_slice(l.as_bytes());
+        }
+        q.extend_from_slice(&[0, 0, 1, 0, 1]);
+        q
+    }
+
+    async fn fake_upstream() -> std::net::SocketAddr {
+        let s = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = s.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            while let Ok((n, peer)) = s.recv_from(&mut buf).await {
+                let mut r = buf[..n].to_vec();
+                r[2] |= 0x80; // QR
+                let _ = s.send_to(&r, peer).await;
+            }
+        });
+        addr
+    }
+
+    async fn doh(app: &Router, token: &str, q: &[u8]) -> (StatusCode, Vec<u8>) {
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/dns-query/{token}"))
+            .header("content-type", "application/dns-message")
+            .body(Body::from(q.to_vec()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let st = resp.status();
+        let b = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (st, b.to_vec())
+    }
+
+    #[tokio::test]
+    async fn cloud_dns_is_token_gated_filtered_rate_limited_and_revocable() {
+        use base64::Engine;
+        let upstream = fake_upstream().await;
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        store.bootstrap_default().await.unwrap();
+        let mut cfg = crate::doh::DnsServiceConfig::new(upstream);
+        cfg.burst = 3.0;
+        cfg.rate_per_sec = 0.0001;
+        let mut state = AppState::new(
+            store,
+            SigningKey::from_bytes(&[1u8; 32]),
+            AuthConfig {
+                break_glass: Some(BreakGlass::new(ADMIN, None).unwrap()),
+                ..Default::default()
+            },
+        );
+        state.dns = Some(Arc::new(crate::doh::DnsService::new(cfg)));
+        let st = Arc::new(state);
+        let app = router(st.clone());
+
+        let (c, _, _) = call(
+            &app,
+            "POST",
+            "/v1/admin/rules",
+            Some(ADMIN),
+            Some(json!({"action": "block", "pattern": "ads.example.com"})),
+        )
+        .await;
+        assert_eq!(c, StatusCode::CREATED);
+        // admin API: needs auth; the secret is returned once
+        let (c, _, _) = call(
+            &app,
+            "POST",
+            "/v1/admin/dns-tokens",
+            None,
+            Some(json!({"name": "x"})),
+        )
+        .await;
+        assert_eq!(c, StatusCode::UNAUTHORIZED);
+        let (c, _, b) = call(
+            &app,
+            "POST",
+            "/v1/admin/dns-tokens",
+            Some(ADMIN),
+            Some(json!({"name": "laptop"})),
+        )
+        .await;
+        assert_eq!(c, StatusCode::CREATED);
+        let t: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        let secret = t["token"].as_str().unwrap().to_string();
+        assert!(
+            t["doh_path"]
+                .as_str()
+                .unwrap()
+                .starts_with("/dns-query/hyg_dns_")
+        );
+        let (_, _, listed) = call(&app, "GET", "/v1/admin/dns-tokens", Some(ADMIN), None).await;
+        assert!(
+            !String::from_utf8_lossy(&listed).contains(&secret),
+            "list never shows secrets"
+        );
+
+        // no / wrong token: nothing is resolved (never an open resolver)
+        assert_eq!(
+            doh(&app, "hyg_dns_nope", &dns_query("example.org")).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            doh(&app, ADMIN, &dns_query("example.org")).await.0,
+            StatusCode::NOT_FOUND
+        );
+
+        // blocked -> NXDOMAIN (rcode 3); allowed -> forwarded upstream
+        let (c, b) = doh(&app, &secret, &dns_query("x.ads.example.com")).await;
+        assert_eq!(c, StatusCode::OK);
+        assert_eq!((b[2] & 0x80, b[3] & 0x0f), (0x80, 3));
+        let (c, b) = doh(&app, &secret, &dns_query("example.org")).await;
+        assert_eq!(c, StatusCode::OK);
+        assert_eq!(
+            (b[0], b[1], b[2] & 0x80, b[3] & 0x0f),
+            (0x12, 0x34, 0x80, 0)
+        );
+        // GET form (RFC 8484)
+        let dns = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(dns_query("example.org"));
+        let (c, _, _) = call(
+            &app,
+            "GET",
+            &format!("/dns-query/{secret}?dns={dns}"),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(c, StatusCode::OK);
+        // burst of 3 is spent: the next one is rate limited
+        assert_eq!(
+            doh(&app, &secret, &dns_query("example.org")).await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+
+        // revocation takes effect immediately on this replica
+        let id = t["id"].as_str().unwrap();
+        let (c, _, _) = call(
+            &app,
+            "DELETE",
+            &format!("/v1/admin/dns-tokens/{id}"),
+            Some(ADMIN),
+            None,
+        )
+        .await;
+        assert_eq!(c, StatusCode::NO_CONTENT);
+        assert_eq!(
+            doh(&app, &secret, &dns_query("example.org")).await.0,
+            StatusCode::NOT_FOUND
+        );
+
+        // oversized and malformed queries
+        let (c2, _, b2) = call(
+            &app,
+            "POST",
+            "/v1/admin/dns-tokens",
+            Some(ADMIN),
+            Some(json!({"name": "two"})),
+        )
+        .await;
+        assert_eq!(c2, StatusCode::CREATED);
+        let s2 = serde_json::from_slice::<serde_json::Value>(&b2).unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            doh(&app, &s2, &vec![0u8; 5000]).await.0,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(doh(&app, &s2, &[1, 2, 3]).await.0, StatusCode::BAD_REQUEST);
+
+        // audit: creation and revocation recorded, secrets never
+        let (_, _, a) = call(&app, "GET", "/v1/admin/audit", Some(ADMIN), None).await;
+        let a = String::from_utf8_lossy(&a);
+        assert!(a.contains("dns-token.create") && a.contains("dns-token.revoke"));
+        assert!(!a.contains(&secret));
+        let n = &st.dns.as_ref().unwrap().counters;
+        assert_eq!(n.blocked.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(n.auth_failures.load(std::sync::atomic::Ordering::Relaxed) >= 3);
+    }
+
+    #[tokio::test]
+    async fn cloud_dns_is_off_unless_configured() {
+        let (app, _) = app();
+        assert_eq!(
+            doh(&app, "hyg_dns_x", &dns_query("example.org")).await.0,
+            StatusCode::NOT_FOUND
+        );
     }
 }

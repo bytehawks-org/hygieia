@@ -9,6 +9,7 @@ license.workspace = true
 hygeia-core.workspace = true
 hygeia-audit.workspace = true
 hygeia-store.workspace = true
+hygeia-dns.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ed25519-dalek.workspace = true

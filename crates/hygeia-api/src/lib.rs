@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod build;
+pub mod doh;
 pub mod oidc;
 mod routes;
 mod state;
