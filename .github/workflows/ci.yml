@@ -101,11 +101,13 @@ jobs:
         with: { node-version: 22 }
       - run: cd web && npm ci && npm run build
       - run: cargo build --release -p hygeia-proxy
+      - run: cargo build --release --manifest-path crates/hygeia-tray/Cargo.toml
       - name: Assemble the zip (exe + UI + install scripts)
         shell: pwsh
         run: |
           New-Item -ItemType Directory dist/hygeia | Out-Null
           Copy-Item target/release/hygeia-proxy.exe dist/hygeia/
+          Copy-Item crates/hygeia-tray/target/release/hygeia-tray.exe dist/hygeia/
           Copy-Item web/out dist/hygeia/web -Recurse
           Copy-Item packaging/windows/*.ps1 dist/hygeia/
           Compress-Archive dist/hygeia dist/hygeia-proxy-windows-x64.zip

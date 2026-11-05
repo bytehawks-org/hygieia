@@ -126,7 +126,8 @@ With DNS off (default) none of this applies and the install touches no network s
 | Linux `.deb` | `packaging/linux/build-deb.sh`: binary, UI, hardened systemd unit (DynamicUser, `StateDirectory`, `CAP_NET_BIND_SERVICE` only), conffile `/etc/hygeia-proxy/hygeia-proxy.toml`; installing does not start or enable the service and touches no resolver | built, inspected, `dpkg -i`/`-r` in the dev container (no systemd there: unit not started) |
 | Linux `.rpm` | `packaging/linux/hygeia-proxy.spec` | not built |
 | Windows service | `hygeia-proxy service install/uninstall/run` (`hygeia-winsvc`: SCM glue, LocalService, data in `%ProgramData%\Hygeia` restricted to SYSTEM/Administrators/LocalService via icacls), `packaging/windows/*.ps1`, CI zip | cross-type-checked only; never run |
-| Windows MSI, tray icon, first-run wizard | not done | – |
+| Tray icon | `crates/hygeia-tray` (own workspace, `tray-icon` + `tao`): status polled from `/healthz`, "Open dashboard" → login page; no credential, no pause (no node API yet); autostart via the install script | cross-type-checked for Windows only; never run (Linux needs GTK/AppIndicator, not built in CI) |
+| Windows MSI, first-run wizard | not done | – |
 
 ## Verification limits
 
