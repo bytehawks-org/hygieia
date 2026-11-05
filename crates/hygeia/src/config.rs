@@ -7,8 +7,70 @@ use serde::Deserialize;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub api: ApiConfig,
+    pub auth: AuthSection,
     pub dns: DnsSection,
     pub lists: ListsSection,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Environment {
+    /// Break-glass is refused at startup.
+    #[default]
+    Production,
+    /// Break-glass allowed (explicit secret required).
+    Staging,
+    /// Break-glass allowed; a throwaway secret is generated if none is given.
+    Dev,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthSection {
+    pub environment: Environment,
+    pub break_glass: BreakGlassSection,
+    pub oidc: OidcSection,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BreakGlassSection {
+    pub enabled: bool,
+    /// The credential stops working this many hours after process start (0 = no limit).
+    pub ttl_hours: u64,
+}
+impl Default for BreakGlassSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ttl_hours: 12,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OidcSection {
+    /// Empty = OIDC disabled.
+    pub issuer: String,
+    pub audience: String,
+    pub leeway_secs: u64,
+    /// Lab only.
+    pub allow_insecure_http: bool,
+    /// `sub` claims that are granted the platform-wide `owner` role at startup
+    /// (idempotent, additive: removing an entry does not revoke the binding).
+    pub bootstrap_owners: Vec<String>,
+}
+impl Default for OidcSection {
+    fn default() -> Self {
+        Self {
+            issuer: String::new(),
+            audience: "hygeia-api".into(),
+            leeway_secs: 30,
+            allow_insecure_http: false,
+            bootstrap_owners: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,6 +170,24 @@ mod tests {
         assert_eq!(c.api.listen, "127.0.0.1:8080");
         assert!(toml::from_str::<Config>("[bogus]").is_err());
         assert!(c.lists.resolve().unwrap().iter().all(|s| s.default_enabled));
+    }
+
+    #[test]
+    fn auth_section() {
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.auth.environment, Environment::Production);
+        assert!(!c.auth.break_glass.enabled, "break-glass is off by default");
+        let c: Config = toml::from_str(
+            "[auth]\nenvironment = \"staging\"\n[auth.break_glass]\nenabled = true\nttl_hours = 4\n[auth.oidc]\nissuer = \"https://idp.example.com\"",
+        )
+        .unwrap();
+        assert_eq!(c.auth.environment, Environment::Staging);
+        assert_eq!(c.auth.break_glass.ttl_hours, 4);
+        assert_eq!(c.auth.oidc.audience, "hygeia-api");
+        assert!(
+            toml::from_str::<Config>("[auth.break_glass]\nsecret = \"x\"").is_err(),
+            "no secrets in the config file"
+        );
     }
 
     #[test]

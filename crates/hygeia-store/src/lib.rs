@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 
 pub const PREFIX_ENROLL: &str = "hyg_enr_";
 pub const PREFIX_DEVICE: &str = "hyg_dev_";
+pub const PREFIX_API: &str = "hyg_api_";
 
 /// 256 random bits with a scanner-friendly prefix. Returns `(secret, sha256)`.
 /// SHA-256 (not Argon2): input has full entropy, and a fast hash allows lookup by index.
@@ -65,6 +66,8 @@ pub enum StoreError {
     InvalidToken,
     #[error("not found")]
     NotFound,
+    #[error("already exists")]
+    Conflict,
     #[error("audit chain broken: {0}")]
     Chain(String),
     #[error("backend error: {0}")]
@@ -116,6 +119,38 @@ pub trait Store: Send + Sync {
 
     async fn next_bundle_version(&self, tenant_id: &str, group_id: &str) -> Result<u64>;
 
+    // ---- tenants and groups ----
+    async fn create_tenant(&self, slug: &str, name: &str) -> Result<Tenant>;
+    async fn list_tenants(&self) -> Result<Vec<Tenant>>;
+    async fn create_group(&self, tenant_id: &str, name: &str) -> Result<Group>;
+    async fn list_groups(&self, tenant_id: &str) -> Result<Vec<Group>>;
+
+    // ---- identity, roles, API tokens ----
+    /// Create on first sight (OIDC login); never grants any role by itself.
+    async fn upsert_user(&self, issuer: &str, subject: &str, email: Option<&str>) -> Result<User>;
+    async fn list_users(&self) -> Result<Vec<User>>;
+    async fn bindings_for_user(&self, user_id: &str) -> Result<Vec<Binding>>;
+    /// Bindings of one tenant (`Some`) or the platform-wide ones (`None`).
+    async fn list_bindings(&self, tenant_id: Option<&str>) -> Result<Vec<Binding>>;
+    async fn bind_role(
+        &self,
+        user_id: &str,
+        tenant_id: Option<&str>,
+        role: rbac::Role,
+    ) -> Result<Binding>;
+    async fn unbind_role(&self, binding_id: &str) -> Result<()>;
+
+    async fn create_api_token(
+        &self,
+        tenant_id: &str,
+        name: &str,
+        role: rbac::Role,
+        expires_at: Option<i64>,
+    ) -> Result<(ApiToken, String)>;
+    async fn authenticate_api_token(&self, secret: &str, now: i64) -> Result<Option<ApiToken>>;
+    async fn revoke_api_token(&self, tenant_id: &str, id: &str) -> Result<()>;
+    async fn list_api_tokens(&self, tenant_id: &str) -> Result<Vec<ApiToken>>;
+
     /// Append to the tenant's hash chain.
     async fn append_audit(&self, draft: Draft) -> Result<()>;
     /// Last `limit` events of the tenant, oldest first.
@@ -148,6 +183,48 @@ pub struct Device {
     pub revoked: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tenant {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Group {
+    pub id: String,
+    pub tenant_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct User {
+    pub id: String,
+    pub issuer: String,
+    pub subject: String,
+    pub email: Option<String>,
+    pub disabled: bool,
+}
+
+/// `tenant_id == None` is a platform-wide binding (MSP operator).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Binding {
+    pub id: String,
+    pub user_id: String,
+    pub tenant_id: Option<String>,
+    pub role: rbac::Role,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiToken {
+    pub id: String,
+    pub tenant_id: String,
+    pub name: String,
+    pub role: rbac::Role,
+    pub expires_at: Option<i64>,
+    pub revoked: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RuleAction {
@@ -173,6 +250,11 @@ struct State {
     rules: Vec<Rule>,
     bundle_version: HashMap<(String, String), u64>,
     audit: HashMap<String, AuditLog>,
+    tenants: Vec<Tenant>,
+    groups: Vec<Group>,
+    users: Vec<User>,
+    bindings: Vec<Binding>,
+    api_tokens: Vec<(ApiToken, [u8; 32])>,
 }
 
 #[derive(Default)]
@@ -340,6 +422,203 @@ impl Store for MemoryStore {
         Ok(*v)
     }
 
+    async fn create_tenant(&self, slug: &str, name: &str) -> Result<Tenant> {
+        let mut s = self.s.lock().unwrap();
+        if s.tenants.iter().any(|t| t.slug == slug) {
+            return Err(StoreError::Conflict);
+        }
+        let t = Tenant {
+            id: new_id(),
+            slug: slug.into(),
+            name: name.into(),
+        };
+        s.tenants.push(t.clone());
+        Ok(t)
+    }
+
+    async fn list_tenants(&self) -> Result<Vec<Tenant>> {
+        Ok(self.s.lock().unwrap().tenants.clone())
+    }
+
+    async fn create_group(&self, tenant_id: &str, name: &str) -> Result<Group> {
+        let mut s = self.s.lock().unwrap();
+        if !s.tenants.iter().any(|t| t.id == tenant_id) {
+            return Err(StoreError::NotFound);
+        }
+        if s.groups
+            .iter()
+            .any(|g| g.tenant_id == tenant_id && g.name == name)
+        {
+            return Err(StoreError::Conflict);
+        }
+        let g = Group {
+            id: new_id(),
+            tenant_id: tenant_id.into(),
+            name: name.into(),
+        };
+        s.groups.push(g.clone());
+        Ok(g)
+    }
+
+    async fn list_groups(&self, tenant_id: &str) -> Result<Vec<Group>> {
+        Ok(self
+            .s
+            .lock()
+            .unwrap()
+            .groups
+            .iter()
+            .filter(|g| g.tenant_id == tenant_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn upsert_user(&self, issuer: &str, subject: &str, email: Option<&str>) -> Result<User> {
+        let mut s = self.s.lock().unwrap();
+        if let Some(u) = s
+            .users
+            .iter_mut()
+            .find(|u| u.issuer == issuer && u.subject == subject)
+        {
+            if email.is_some() {
+                u.email = email.map(Into::into);
+            }
+            return Ok(u.clone());
+        }
+        let u = User {
+            id: new_id(),
+            issuer: issuer.into(),
+            subject: subject.into(),
+            email: email.map(Into::into),
+            disabled: false,
+        };
+        s.users.push(u.clone());
+        Ok(u)
+    }
+
+    async fn list_users(&self) -> Result<Vec<User>> {
+        Ok(self.s.lock().unwrap().users.clone())
+    }
+
+    async fn bindings_for_user(&self, user_id: &str) -> Result<Vec<Binding>> {
+        Ok(self
+            .s
+            .lock()
+            .unwrap()
+            .bindings
+            .iter()
+            .filter(|b| b.user_id == user_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn list_bindings(&self, tenant_id: Option<&str>) -> Result<Vec<Binding>> {
+        Ok(self
+            .s
+            .lock()
+            .unwrap()
+            .bindings
+            .iter()
+            .filter(|b| b.tenant_id.as_deref() == tenant_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn bind_role(
+        &self,
+        user_id: &str,
+        tenant_id: Option<&str>,
+        role: rbac::Role,
+    ) -> Result<Binding> {
+        let mut s = self.s.lock().unwrap();
+        if !s.users.iter().any(|u| u.id == user_id) {
+            return Err(StoreError::NotFound);
+        }
+        if let Some(b) = s
+            .bindings
+            .iter()
+            .find(|b| b.user_id == user_id && b.tenant_id.as_deref() == tenant_id && b.role == role)
+        {
+            return Ok(b.clone());
+        }
+        let b = Binding {
+            id: new_id(),
+            user_id: user_id.into(),
+            tenant_id: tenant_id.map(Into::into),
+            role,
+        };
+        s.bindings.push(b.clone());
+        Ok(b)
+    }
+
+    async fn unbind_role(&self, binding_id: &str) -> Result<()> {
+        let mut s = self.s.lock().unwrap();
+        let i = s
+            .bindings
+            .iter()
+            .position(|b| b.id == binding_id)
+            .ok_or(StoreError::NotFound)?;
+        s.bindings.remove(i);
+        Ok(())
+    }
+
+    async fn create_api_token(
+        &self,
+        tenant_id: &str,
+        name: &str,
+        role: rbac::Role,
+        expires_at: Option<i64>,
+    ) -> Result<(ApiToken, String)> {
+        if role == rbac::Role::Owner {
+            return Err(StoreError::NotFound); // platform role cannot be tenant-scoped
+        }
+        let (secret, hash) = new_secret(PREFIX_API);
+        let t = ApiToken {
+            id: new_id(),
+            tenant_id: tenant_id.into(),
+            name: name.into(),
+            role,
+            expires_at,
+            revoked: false,
+        };
+        self.s.lock().unwrap().api_tokens.push((t.clone(), hash));
+        Ok((t, secret))
+    }
+
+    async fn authenticate_api_token(&self, secret: &str, now: i64) -> Result<Option<ApiToken>> {
+        if !secret.starts_with(PREFIX_API) {
+            return Ok(None);
+        }
+        let h = hash_secret(secret);
+        let s = self.s.lock().unwrap();
+        Ok(s.api_tokens
+            .iter()
+            .find(|(t, hash)| *hash == h && !t.revoked && t.expires_at.is_none_or(|e| e > now))
+            .map(|(t, _)| t.clone()))
+    }
+
+    async fn revoke_api_token(&self, tenant_id: &str, id: &str) -> Result<()> {
+        let mut s = self.s.lock().unwrap();
+        let (t, _) = s
+            .api_tokens
+            .iter_mut()
+            .find(|(t, _)| t.id == id && t.tenant_id == tenant_id)
+            .ok_or(StoreError::NotFound)?;
+        t.revoked = true;
+        Ok(())
+    }
+
+    async fn list_api_tokens(&self, tenant_id: &str) -> Result<Vec<ApiToken>> {
+        Ok(self
+            .s
+            .lock()
+            .unwrap()
+            .api_tokens
+            .iter()
+            .filter(|(t, _)| t.tenant_id == tenant_id)
+            .map(|(t, _)| t.clone())
+            .collect())
+    }
+
     async fn append_audit(&self, draft: Draft) -> Result<()> {
         let mut s = self.s.lock().unwrap();
         s.audit
@@ -385,5 +664,6 @@ mod tests {
     async fn memory_store_conformance() {
         let st = MemoryStore::new();
         crate::conformance::run(&st, ("t1", "g1", "g1b"), ("t2", "g2")).await;
+        crate::conformance::run_identity(&MemoryStore::new()).await;
     }
 }

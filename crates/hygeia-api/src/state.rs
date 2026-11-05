@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use hygeia_core::ParsedSource;
 
+use crate::auth::AuthConfig;
 use crate::build::compile;
 
 pub use hygeia_store::{DEFAULT_GROUP_ID as DEFAULT_GROUP, DEFAULT_TENANT_ID as DEFAULT_TENANT};
@@ -23,7 +24,7 @@ pub fn now() -> i64 {
 pub struct AppState {
     pub store: Arc<dyn Store>,
     pub signing_key: SigningKey,
-    pub admin_token_hash: [u8; 32],
+    pub auth: AuthConfig,
     lists: RwLock<Vec<Arc<ParsedSource>>>,
     list_status: RwLock<Value>,
     /// Notified by `POST /v1/admin/lists/refresh`; the list refresher awaits it.
@@ -32,11 +33,11 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(store: Arc<dyn Store>, signing_key: SigningKey, admin_token: &str) -> Self {
+    pub fn new(store: Arc<dyn Store>, signing_key: SigningKey, auth: AuthConfig) -> Self {
         Self {
             store,
             signing_key,
-            admin_token_hash: hygeia_store::hash_secret(admin_token),
+            auth,
             lists: RwLock::new(Vec::new()),
             list_status: RwLock::new(Value::Array(vec![])),
             refresh_requested: Arc::new(tokio::sync::Notify::new()),

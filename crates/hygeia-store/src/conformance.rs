@@ -4,6 +4,7 @@
 
 use hygeia_audit::Draft;
 
+use crate::rbac::Role;
 use crate::{Rule, RuleAction, Store, StoreError};
 
 fn draft(tenant: &str, n: i64) -> Draft {
@@ -125,4 +126,135 @@ pub async fn run(st: &dyn Store, a: (&str, &str, &str), b: (&str, &str)) {
     assert_eq!(last3.len(), 3);
     assert_eq!(last3[0].seq, 2);
     assert!(last3.iter().all(|e| e.draft.tenant_id == ta));
+}
+
+/// Tenants, groups, users, role bindings and API tokens. Creates its own tenants.
+pub async fn run_identity(st: &dyn Store) {
+    let a = st.create_tenant("acme", "Acme").await.unwrap();
+    let b = st.create_tenant("beta", "Beta").await.unwrap();
+    assert_eq!(
+        st.create_tenant("acme", "dup").await.map(|_| ()),
+        Err(StoreError::Conflict)
+    );
+    assert!(st.list_tenants().await.unwrap().len() >= 2);
+
+    let g = st.create_group(&a.id, "staff").await.unwrap();
+    assert_eq!(
+        st.create_group(&a.id, "staff").await.map(|_| ()),
+        Err(StoreError::Conflict)
+    );
+    st.create_group(&b.id, "staff").await.unwrap(); // same name in another tenant is fine
+    assert_eq!(st.list_groups(&a.id).await.unwrap(), vec![g]);
+
+    // users: idempotent upsert keyed by (issuer, subject); no implicit roles
+    let u1 = st
+        .upsert_user("https://idp.example.com", "sub-1", Some("a@example.com"))
+        .await
+        .unwrap();
+    let u1b = st
+        .upsert_user("https://idp.example.com", "sub-1", None)
+        .await
+        .unwrap();
+    assert_eq!(u1.id, u1b.id);
+    assert_eq!(
+        u1b.email.as_deref(),
+        Some("a@example.com"),
+        "missing claim must not erase the email"
+    );
+    let u2 = st
+        .upsert_user("https://other-idp.example.com", "sub-1", None)
+        .await
+        .unwrap();
+    assert_ne!(
+        u1.id, u2.id,
+        "same subject at another issuer is another user"
+    );
+    assert!(st.bindings_for_user(&u1.id).await.unwrap().is_empty());
+
+    // bindings: tenant-scoped and platform-wide, idempotent
+    let b1 = st
+        .bind_role(&u1.id, Some(&a.id), Role::Editor)
+        .await
+        .unwrap();
+    assert_eq!(
+        st.bind_role(&u1.id, Some(&a.id), Role::Editor)
+            .await
+            .unwrap()
+            .id,
+        b1.id
+    );
+    st.bind_role(&u1.id, None, Role::Auditor).await.unwrap();
+    assert_eq!(st.bindings_for_user(&u1.id).await.unwrap().len(), 2);
+    assert_eq!(st.list_bindings(Some(&a.id)).await.unwrap().len(), 1);
+    assert_eq!(st.list_bindings(Some(&b.id)).await.unwrap().len(), 0);
+    assert!(
+        st.list_bindings(None)
+            .await
+            .unwrap()
+            .iter()
+            .all(|x| x.tenant_id.is_none())
+    );
+    assert_eq!(
+        st.bind_role("00000000-0000-0000-0000-0000000000ff", None, Role::Viewer)
+            .await
+            .map(|_| ()),
+        Err(StoreError::NotFound)
+    );
+    st.unbind_role(&b1.id).await.unwrap();
+    assert_eq!(st.unbind_role(&b1.id).await, Err(StoreError::NotFound));
+
+    // API tokens
+    let (t, secret) = st
+        .create_api_token(&a.id, "ci", Role::Editor, Some(1000))
+        .await
+        .unwrap();
+    assert!(secret.starts_with("hyg_api_"));
+    let got = st
+        .authenticate_api_token(&secret, 500)
+        .await
+        .unwrap()
+        .expect("valid token");
+    assert_eq!(
+        (got.tenant_id.as_str(), got.role),
+        (a.id.as_str(), Role::Editor)
+    );
+    assert!(
+        st.authenticate_api_token(&secret, 1000)
+            .await
+            .unwrap()
+            .is_none(),
+        "expired"
+    );
+    assert!(
+        st.authenticate_api_token("hyg_api_nope", 0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        st.authenticate_api_token("hyg_dev_whatever", 0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        st.revoke_api_token(&b.id, &t.id).await,
+        Err(StoreError::NotFound),
+        "other tenant cannot revoke"
+    );
+    assert_eq!(st.list_api_tokens(&b.id).await.unwrap().len(), 0);
+    st.revoke_api_token(&a.id, &t.id).await.unwrap();
+    assert!(
+        st.authenticate_api_token(&secret, 500)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(st.list_api_tokens(&a.id).await.unwrap()[0].revoked);
+    assert!(
+        st.create_api_token(&a.id, "x", Role::Owner, None)
+            .await
+            .is_err(),
+        "owner is platform-only"
+    );
 }

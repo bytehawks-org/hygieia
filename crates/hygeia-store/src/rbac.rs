@@ -12,9 +12,27 @@ pub enum Permission {
     DevicesRead,
     DevicesManage,
     TokensManage,
+    /// Long-lived API credentials (more sensitive than device enrollment tokens).
+    ApiTokensManage,
     AuditRead,
     UsersManage,
+    GroupsManage,
     TenantsManage,
+}
+
+impl Permission {
+    pub const ALL: [Permission; 10] = [
+        Permission::RulesRead,
+        Permission::RulesWrite,
+        Permission::DevicesRead,
+        Permission::DevicesManage,
+        Permission::TokensManage,
+        Permission::ApiTokensManage,
+        Permission::AuditRead,
+        Permission::UsersManage,
+        Permission::GroupsManage,
+        Permission::TenantsManage,
+    ];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
 use axum::Router;
@@ -7,10 +8,12 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use hygeia_core::{Ruleset, RulesetData, SignedBundle};
-use hygeia_store::{Rule, RuleAction, StoreError, hash_secret};
+use hygeia_store::rbac::{Permission, Role};
+use hygeia_store::{Rule, RuleAction, StoreError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::auth::{AuthError, Principal, authenticate};
 use crate::state::{AppState, DEFAULT_GROUP, DEFAULT_TENANT, now};
 
 type S = State<Arc<AppState>>;
@@ -18,9 +21,23 @@ type S = State<Arc<AppState>>;
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        // data plane (device credentials)
         .route("/v1/pubkey", get(pubkey))
         .route("/v1/enroll", post(enroll))
         .route("/v1/bundle", get(bundle))
+        // identity
+        .route("/v1/me", get(me))
+        // administration
+        .route("/v1/admin/tenants", get(list_tenants).post(create_tenant))
+        .route("/v1/admin/groups", get(list_groups).post(create_group))
+        .route("/v1/admin/users", get(list_users))
+        .route("/v1/admin/bindings", get(list_bindings).post(add_binding))
+        .route("/v1/admin/bindings/{id}", delete(remove_binding))
+        .route(
+            "/v1/admin/api-tokens",
+            get(list_api_tokens).post(create_api_token),
+        )
+        .route("/v1/admin/api-tokens/{id}", delete(revoke_api_token))
         .route("/v1/admin/enrollment-tokens", post(create_token))
         .route("/v1/admin/devices", get(list_devices))
         .route("/v1/admin/devices/{id}", delete(revoke_device))
@@ -34,6 +51,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+// ---------------------------------------------------------------- auth helpers
+
 fn bearer(h: &HeaderMap) -> Option<&str> {
     h.get(header::AUTHORIZATION)?
         .to_str()
@@ -41,23 +60,104 @@ fn bearer(h: &HeaderMap) -> Option<&str> {
         .strip_prefix("Bearer ")
 }
 
-/// Constant-time comparison of SHA-256 digests.
-fn admin_ok(st: &AppState, h: &HeaderMap) -> bool {
-    let Some(t) = bearer(h) else { return false };
-    let a = hash_secret(t);
-    a.iter()
-        .zip(st.admin_token_hash.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
+impl Principal {
+    /// Tenant used when a request does not name one: a token's own tenant,
+    /// otherwise the default tenant (single-org deployments).
+    fn default_tenant(&self) -> String {
+        match self {
+            Principal::ApiToken { tenant_id, .. } => tenant_id.clone(),
+            _ => DEFAULT_TENANT.to_string(),
+        }
+    }
 }
 
-macro_rules! admin {
-    ($st:expr, $h:expr) => {
-        if !admin_ok(&$st, &$h) {
-            return StatusCode::UNAUTHORIZED.into_response();
+/// Authenticate only.
+async fn authn(st: &AppState, h: &HeaderMap) -> Result<Principal, Response> {
+    match authenticate(&st.auth, &*st.store, h, now()).await {
+        Ok(p) => Ok(p),
+        Err(AuthError::Unauthenticated | AuthError::Forbidden) => {
+            // Slow down credential guessing against the admin API.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Err(StatusCode::UNAUTHORIZED.into_response())
+        }
+        Err(AuthError::Backend) => Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    }
+}
+
+/// Authenticate, resolve the tenant and require `perm` on it.
+/// `scope`: `Some(tenant)` / `None` = request's own default tenant; use
+/// [`guard_platform`] for platform-level operations.
+async fn guard(
+    st: &AppState,
+    h: &HeaderMap,
+    perm: Permission,
+    tenant: Option<String>,
+    label: &str,
+) -> Result<(Principal, String), Response> {
+    let p = authn(st, h).await?;
+    let tenant = tenant.unwrap_or_else(|| p.default_tenant());
+    if !p.can(perm, Some(&tenant)) {
+        return Err(StatusCode::FORBIDDEN.into_response());
+    }
+    note_break_glass(st, &p, &tenant, label).await;
+    Ok((p, tenant))
+}
+
+/// Platform-level operation (tenant lifecycle, user directory, list refresh).
+async fn guard_platform(
+    st: &AppState,
+    h: &HeaderMap,
+    perm: Permission,
+    label: &str,
+) -> Result<Principal, Response> {
+    let p = authn(st, h).await?;
+    if !p.can(perm, None) {
+        return Err(StatusCode::FORBIDDEN.into_response());
+    }
+    note_break_glass(st, &p, DEFAULT_TENANT, label).await;
+    Ok(p)
+}
+
+/// Every break-glass request leaves a record in the audit chain of the tenant it touched.
+async fn note_break_glass(st: &AppState, p: &Principal, tenant: &str, label: &str) {
+    if p.is_break_glass() {
+        tracing::warn!(label, tenant, "BREAK-GLASS credential used");
+        st.record(tenant, &p.actor(), "auth.break_glass", label, None)
+            .await;
+    }
+}
+
+/// Map store failures to HTTP without leaking backend details to clients.
+fn store_err(e: StoreError) -> Response {
+    match e {
+        StoreError::NotFound => StatusCode::NOT_FOUND.into_response(),
+        StoreError::Conflict => StatusCode::CONFLICT.into_response(),
+        StoreError::InvalidToken => StatusCode::UNAUTHORIZED.into_response(),
+        other => {
+            tracing::error!(error = %other, "store error");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+macro_rules! ok_or {
+    ($e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(e) => return store_err(e),
         }
     };
 }
+macro_rules! gate {
+    ($e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(r) => return r,
+        }
+    };
+}
+
+// ---------------------------------------------------------------- data plane
 
 async fn pubkey(State(st): S) -> String {
     st.signing_key
@@ -66,18 +166,6 @@ async fn pubkey(State(st): S) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
-}
-
-/// Map store failures to HTTP without leaking backend details to clients.
-fn store_err(e: StoreError) -> Response {
-    match e {
-        StoreError::NotFound => StatusCode::NOT_FOUND.into_response(),
-        StoreError::InvalidToken => StatusCode::UNAUTHORIZED.into_response(),
-        other => {
-            tracing::error!(error = %other, "store error");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -117,10 +205,7 @@ async fn bundle(State(st): S, headers: HeaderMap) -> Response {
         Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
         Err(e) => return store_err(e),
     };
-    let b: Arc<SignedBundle> = match st.bundle_for(&dev.tenant_id, &dev.group_id).await {
-        Ok(b) => b,
-        Err(e) => return store_err(e),
-    };
+    let b: Arc<SignedBundle> = ok_or!(st.bundle_for(&dev.tenant_id, &dev.group_id).await);
     let etag = b.etag();
     let not_modified = headers
         .get(header::IF_NONE_MATCH)
@@ -143,18 +228,261 @@ async fn bundle(State(st): S, headers: HeaderMap) -> Response {
         .into_response()
 }
 
+// ---------------------------------------------------------------- identity
+
+async fn me(State(st): S, h: HeaderMap) -> Response {
+    let p = gate!(authn(&st, &h).await);
+    Json(p).into_response()
+}
+
+// ---------------------------------------------------------------- tenants, groups, users
+
+#[derive(Deserialize)]
+struct NewTenant {
+    slug: String,
+    name: String,
+}
+
+async fn create_tenant(State(st): S, h: HeaderMap, Json(r): Json<NewTenant>) -> Response {
+    let p = gate!(guard_platform(&st, &h, Permission::TenantsManage, "tenant.create").await);
+    let t = ok_or!(st.store.create_tenant(&r.slug, &r.name).await);
+    st.record(
+        &t.id,
+        &p.actor(),
+        "tenant.create",
+        &t.id,
+        Some(json!({"after": t})),
+    )
+    .await;
+    (StatusCode::CREATED, Json(t)).into_response()
+}
+
+async fn list_tenants(State(st): S, h: HeaderMap) -> Response {
+    gate!(guard_platform(&st, &h, Permission::TenantsManage, "tenant.list").await);
+    Json(ok_or!(st.store.list_tenants().await)).into_response()
+}
+
+#[derive(Deserialize)]
+struct TenantQ {
+    tenant_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct NewGroup {
+    tenant_id: Option<String>,
+    name: String,
+}
+
+async fn create_group(State(st): S, h: HeaderMap, Json(r): Json<NewGroup>) -> Response {
+    let (p, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::GroupsManage,
+            r.tenant_id,
+            "group.create"
+        )
+        .await
+    );
+    let g = ok_or!(st.store.create_group(&tenant, &r.name).await);
+    st.record(
+        &tenant,
+        &p.actor(),
+        "group.create",
+        &g.id,
+        Some(json!({"after": g})),
+    )
+    .await;
+    (StatusCode::CREATED, Json(g)).into_response()
+}
+
+async fn list_groups(State(st): S, h: HeaderMap, Query(q): Query<TenantQ>) -> Response {
+    let (_, tenant) = gate!(guard(&st, &h, Permission::RulesRead, q.tenant_id, "group.list").await);
+    Json(ok_or!(st.store.list_groups(&tenant).await)).into_response()
+}
+
+async fn list_users(State(st): S, h: HeaderMap) -> Response {
+    gate!(guard_platform(&st, &h, Permission::TenantsManage, "user.list").await);
+    Json(ok_or!(st.store.list_users().await)).into_response()
+}
+
+// ---------------------------------------------------------------- role bindings
+
+#[derive(Deserialize)]
+struct NewBinding {
+    user_id: String,
+    /// Omit for a platform-wide binding (requires platform scope).
+    tenant_id: Option<String>,
+    role: Role,
+}
+
+async fn add_binding(State(st): S, h: HeaderMap, Json(r): Json<NewBinding>) -> Response {
+    let p = gate!(authn(&st, &h).await);
+    let scope = r.tenant_id.as_deref();
+    // Managing users needs UsersManage in that scope; platform-wide bindings need platform scope.
+    if !p.can(Permission::UsersManage, scope) || !p.can_grant(r.role, scope) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    // `owner` exists only as a platform role.
+    if r.role == Role::Owner && scope.is_some() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "owner is a platform-wide role",
+        )
+            .into_response();
+    }
+    note_break_glass(&st, &p, scope.unwrap_or(DEFAULT_TENANT), "binding.create").await;
+    let b = ok_or!(st.store.bind_role(&r.user_id, scope, r.role).await);
+    st.record(
+        scope.unwrap_or(DEFAULT_TENANT),
+        &p.actor(),
+        "binding.create",
+        &b.id,
+        Some(json!({"after": b})),
+    )
+    .await;
+    (StatusCode::CREATED, Json(b)).into_response()
+}
+
+async fn list_bindings(State(st): S, h: HeaderMap, Query(q): Query<TenantQ>) -> Response {
+    let (_, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::UsersManage,
+            q.tenant_id,
+            "binding.list"
+        )
+        .await
+    );
+    Json(ok_or!(st.store.list_bindings(Some(&tenant)).await)).into_response()
+}
+
+async fn remove_binding(
+    State(st): S,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<TenantQ>,
+) -> Response {
+    let (p, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::UsersManage,
+            q.tenant_id,
+            "binding.delete"
+        )
+        .await
+    );
+    // Only bindings of the named tenant can be removed through it.
+    let bindings = ok_or!(st.store.list_bindings(Some(&tenant)).await);
+    let Some(b) = bindings.into_iter().find(|b| b.id == id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    ok_or!(st.store.unbind_role(&id).await);
+    st.record(
+        &tenant,
+        &p.actor(),
+        "binding.delete",
+        &id,
+        Some(json!({"before": b})),
+    )
+    .await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+// ---------------------------------------------------------------- API tokens
+
+#[derive(Deserialize)]
+struct NewApiToken {
+    tenant_id: Option<String>,
+    name: String,
+    role: Role,
+    ttl_secs: Option<i64>,
+}
+
+async fn create_api_token(State(st): S, h: HeaderMap, Json(r): Json<NewApiToken>) -> Response {
+    let (p, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::ApiTokensManage,
+            r.tenant_id,
+            "api-token.create"
+        )
+        .await
+    );
+    if r.role == Role::Owner || !p.can_grant(r.role, Some(&tenant)) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let expires = r.ttl_secs.map(|t| now().saturating_add(t));
+    let (t, secret) = ok_or!(
+        st.store
+            .create_api_token(&tenant, &r.name, r.role, expires)
+            .await
+    );
+    // The secret is NOT in the audit diff.
+    st.record(
+        &tenant,
+        &p.actor(),
+        "api-token.create",
+        &t.id,
+        Some(json!({"after": t})),
+    )
+    .await;
+    (
+        StatusCode::CREATED,
+        Json(json!({"id": t.id, "token": secret, "role": t.role, "expires_at": t.expires_at})),
+    )
+        .into_response()
+}
+
+async fn list_api_tokens(State(st): S, h: HeaderMap, Query(q): Query<TenantQ>) -> Response {
+    let (_, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::ApiTokensManage,
+            q.tenant_id,
+            "api-token.list"
+        )
+        .await
+    );
+    Json(ok_or!(st.store.list_api_tokens(&tenant).await)).into_response()
+}
+
+async fn revoke_api_token(
+    State(st): S,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<TenantQ>,
+) -> Response {
+    let (p, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::ApiTokensManage,
+            q.tenant_id,
+            "api-token.revoke"
+        )
+        .await
+    );
+    ok_or!(st.store.revoke_api_token(&tenant, &id).await);
+    st.record(&tenant, &p.actor(), "api-token.revoke", &id, None)
+        .await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+// ---------------------------------------------------------------- devices, enrollment
+
 #[derive(Deserialize)]
 struct NewToken {
-    #[serde(default = "d_tenant")]
-    tenant_id: String,
+    tenant_id: Option<String>,
     #[serde(default = "d_group")]
     group_id: String,
     #[serde(default = "d_ttl")]
     ttl_secs: i64,
     max_uses: Option<u32>,
-}
-fn d_tenant() -> String {
-    DEFAULT_TENANT.into()
 }
 fn d_group() -> String {
     DEFAULT_GROUP.into()
@@ -164,40 +492,37 @@ fn d_ttl() -> i64 {
 }
 
 async fn create_token(State(st): S, h: HeaderMap, Json(r): Json<NewToken>) -> Response {
-    admin!(st, h);
-    match st
-        .store
-        .create_enrollment_token(&r.tenant_id, &r.group_id, r.ttl_secs, r.max_uses, now())
+    let (p, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::TokensManage,
+            r.tenant_id,
+            "enrollment-token.create"
+        )
         .await
-    {
-        Ok((t, secret)) => {
-            // The secret is deliberately NOT in the audit diff.
-            st.record(
-                &r.tenant_id,
-                "admin",
-                "token.create",
-                &t.id,
-                Some(json!({"group": r.group_id, "expires_at": t.expires_at, "max_uses": r.max_uses})),
-            )
-            .await;
-            Json(json!({"id": t.id, "token": secret, "expires_at": t.expires_at})).into_response()
-        }
-        Err(e) => store_err(e),
-    }
-}
-
-#[derive(Deserialize)]
-struct TenantQ {
-    #[serde(default = "d_tenant")]
-    tenant_id: String,
+    );
+    let (t, secret) = ok_or!(
+        st.store
+            .create_enrollment_token(&tenant, &r.group_id, r.ttl_secs, r.max_uses, now())
+            .await
+    );
+    // The secret is deliberately NOT in the audit diff.
+    st.record(
+        &tenant,
+        &p.actor(),
+        "token.create",
+        &t.id,
+        Some(json!({"group": r.group_id, "expires_at": t.expires_at, "max_uses": r.max_uses})),
+    )
+    .await;
+    Json(json!({"id": t.id, "token": secret, "expires_at": t.expires_at})).into_response()
 }
 
 async fn list_devices(State(st): S, h: HeaderMap, Query(q): Query<TenantQ>) -> Response {
-    admin!(st, h);
-    match st.store.list_devices(&q.tenant_id).await {
-        Ok(v) => Json(v).into_response(),
-        Err(e) => store_err(e),
-    }
+    let (_, tenant) =
+        gate!(guard(&st, &h, Permission::DevicesRead, q.tenant_id, "device.list").await);
+    Json(ok_or!(st.store.list_devices(&tenant).await)).into_response()
 }
 
 async fn revoke_device(
@@ -206,29 +531,32 @@ async fn revoke_device(
     Path(id): Path<String>,
     Query(q): Query<TenantQ>,
 ) -> Response {
-    admin!(st, h);
-    match st.store.revoke_device(&q.tenant_id, &id).await {
-        Ok(()) => {
-            st.record(&q.tenant_id, "admin", "device.revoke", &id, None)
-                .await;
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Err(e) => store_err(e),
-    }
+    let (p, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::DevicesManage,
+            q.tenant_id,
+            "device.revoke"
+        )
+        .await
+    );
+    ok_or!(st.store.revoke_device(&tenant, &id).await);
+    st.record(&tenant, &p.actor(), "device.revoke", &id, None)
+        .await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
+// ---------------------------------------------------------------- rules
+
 async fn list_rules(State(st): S, h: HeaderMap, Query(q): Query<TenantQ>) -> Response {
-    admin!(st, h);
-    match st.store.list_rules(&q.tenant_id).await {
-        Ok(v) => Json(v).into_response(),
-        Err(e) => store_err(e),
-    }
+    let (_, tenant) = gate!(guard(&st, &h, Permission::RulesRead, q.tenant_id, "rule.list").await);
+    Json(ok_or!(st.store.list_rules(&tenant).await)).into_response()
 }
 
 #[derive(Deserialize)]
 struct NewRule {
-    #[serde(default = "d_tenant")]
-    tenant_id: String,
+    tenant_id: Option<String>,
     group_id: Option<String>,
     action: RuleAction,
     pattern: String,
@@ -237,37 +565,33 @@ struct NewRule {
 }
 
 async fn add_rule(State(st): S, h: HeaderMap, Json(r): Json<NewRule>) -> Response {
-    admin!(st, h);
+    let (p, tenant) =
+        gate!(guard(&st, &h, Permission::RulesWrite, r.tenant_id, "rule.create").await);
     if hygeia_core::normalize(&r.pattern).is_none() {
         return (StatusCode::UNPROCESSABLE_ENTITY, "invalid domain pattern").into_response();
     }
-    let tenant = r.tenant_id.clone();
-    let res = st
-        .store
-        .add_rule(Rule {
-            id: String::new(),
-            tenant_id: r.tenant_id,
-            group_id: r.group_id,
-            action: r.action,
-            pattern: r.pattern,
-            comment: r.comment,
-        })
-        .await;
-    match res {
-        Ok(rule) => {
-            st.invalidate();
-            st.record(
-                &tenant,
-                "admin",
-                "rule.create",
-                &rule.id,
-                Some(json!({"after": rule})),
-            )
-            .await;
-            (StatusCode::CREATED, Json(rule)).into_response()
-        }
-        Err(e) => store_err(e),
-    }
+    let rule = ok_or!(
+        st.store
+            .add_rule(Rule {
+                id: String::new(),
+                tenant_id: tenant.clone(),
+                group_id: r.group_id,
+                action: r.action,
+                pattern: r.pattern,
+                comment: r.comment,
+            })
+            .await
+    );
+    st.invalidate();
+    st.record(
+        &tenant,
+        &p.actor(),
+        "rule.create",
+        &rule.id,
+        Some(json!({"after": rule})),
+    )
+    .await;
+    (StatusCode::CREATED, Json(rule)).into_response()
 }
 
 async fn delete_rule(
@@ -276,39 +600,42 @@ async fn delete_rule(
     Path(id): Path<String>,
     Query(q): Query<TenantQ>,
 ) -> Response {
-    admin!(st, h);
-    match st.store.delete_rule(&q.tenant_id, &id).await {
-        Ok(rule) => {
-            st.invalidate();
-            st.record(
-                &q.tenant_id,
-                "admin",
-                "rule.delete",
-                &id,
-                Some(json!({"before": rule})),
-            )
-            .await;
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Err(e) => store_err(e),
-    }
+    let (p, tenant) =
+        gate!(guard(&st, &h, Permission::RulesWrite, q.tenant_id, "rule.delete").await);
+    let rule = ok_or!(st.store.delete_rule(&tenant, &id).await);
+    st.invalidate();
+    st.record(
+        &tenant,
+        &p.actor(),
+        "rule.delete",
+        &id,
+        Some(json!({"before": rule})),
+    )
+    .await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
+// ---------------------------------------------------------------- lists
+
 async fn lists_status(State(st): S, h: HeaderMap) -> Response {
-    admin!(st, h);
+    let p = gate!(authn(&st, &h).await);
+    if !p.can_anywhere(Permission::RulesRead) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     Json(st.list_status()).into_response()
 }
 
 async fn lists_refresh(State(st): S, h: HeaderMap) -> Response {
-    admin!(st, h);
+    gate!(guard_platform(&st, &h, Permission::TenantsManage, "lists.refresh").await);
     st.refresh_requested.notify_one();
     StatusCode::ACCEPTED.into_response()
 }
 
+// ---------------------------------------------------------------- simulate
+
 #[derive(Deserialize)]
 struct SimReq {
-    #[serde(default = "d_tenant")]
-    tenant_id: String,
+    tenant_id: Option<String>,
     #[serde(default = "d_group")]
     group_id: String,
     host: String,
@@ -331,11 +658,8 @@ struct SimResp {
 /// "What would happen if": evaluates a host against the current bundle, and
 /// against the bundle plus uncommitted rules.
 async fn simulate(State(st): S, h: HeaderMap, Json(r): Json<SimReq>) -> Response {
-    admin!(st, h);
-    let signed = match st.bundle_for(&r.tenant_id, &r.group_id).await {
-        Ok(b) => b,
-        Err(e) => return store_err(e),
-    };
+    let (_, tenant) = gate!(guard(&st, &h, Permission::RulesRead, r.tenant_id, "simulate").await);
+    let signed = ok_or!(st.bundle_for(&tenant, &r.group_id).await);
     let Ok(bundle) = SignedBundle::open(&signed.0, &st.signing_key.verifying_key()) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
@@ -357,10 +681,11 @@ async fn simulate(State(st): S, h: HeaderMap, Json(r): Json<SimReq>) -> Response
     .into_response()
 }
 
+// ---------------------------------------------------------------- audit
+
 #[derive(Deserialize)]
 struct AuditQ {
-    #[serde(default = "d_tenant")]
-    tenant_id: String,
+    tenant_id: Option<String>,
     #[serde(default = "d_limit")]
     limit: u32,
 }
@@ -369,16 +694,17 @@ fn d_limit() -> u32 {
 }
 
 async fn audit(State(st): S, h: HeaderMap, Query(q): Query<AuditQ>) -> Response {
-    admin!(st, h);
-    match st.store.list_audit(&q.tenant_id, q.limit.min(1000)).await {
-        Ok(v) => Json(v).into_response(),
-        Err(e) => store_err(e),
-    }
+    let (_, tenant) = gate!(guard(&st, &h, Permission::AuditRead, q.tenant_id, "audit.read").await);
+    Json(ok_or!(
+        st.store.list_audit(&tenant, q.limit.min(1000)).await
+    ))
+    .into_response()
 }
 
 async fn audit_verify(State(st): S, h: HeaderMap, Query(q): Query<TenantQ>) -> Response {
-    admin!(st, h);
-    match st.store.verify_audit(&q.tenant_id).await {
+    let (_, tenant) =
+        gate!(guard(&st, &h, Permission::AuditRead, q.tenant_id, "audit.verify").await);
+    match st.store.verify_audit(&tenant).await {
         Ok(s) => Json(json!({"ok": true, "head": s.head, "events": s.events})).into_response(),
         Err(StoreError::Chain(e)) => {
             (StatusCode::CONFLICT, Json(json!({"ok": false, "error": e}))).into_response()
@@ -390,18 +716,34 @@ async fn audit_verify(State(st): S, h: HeaderMap, Query(q): Query<TenantQ>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::{AuthConfig, BreakGlass};
+    use crate::oidc::{OidcConfig, OidcVerifier};
     use axum::body::Body;
     use axum::http::Request;
     use ed25519_dalek::SigningKey;
     use http_body_util::BodyExt;
+    use hygeia_store::{MemoryStore, Store};
     use tower::ServiceExt;
 
-    fn app() -> (Router, Arc<AppState>) {
-        let st = Arc::new(AppState::new(
-            Arc::new(hygeia_store::MemoryStore::new()),
+    const ADMIN: &str = "break-glass-secret-0123456789-abcdefghij";
+    const EC_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgTqNA8KqOem7Q9HxJ\nqamBxx8isBNRHhW6ah265O/be++hRANCAAR/0MK4G9AeQtccDZy6CB4bZbUgidiq\n4DHAc5x7JREX3l5ggMoFU5nuMKGK8ZAQM31lkUEz1SKzPP+F18bIQu78\n-----END PRIVATE KEY-----";
+    const EC_KEY_OTHER: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgIIG4/vTfKgagctoS\nVb4gJJlEkxkToqhaE1A1ivrWu0ShRANCAAS3wg5JYQD9oeH/fX79mtt5yv2DyrYy\n8GIGrhI9ocIX3KEN0Bp43MISYWU+vwklktrtGYaq3USFJtFlAfyeBGcb\n-----END PRIVATE KEY-----";
+    const JWK_X: &str = "f9DCuBvQHkLXHA2cuggeG2W1IInYquAxwHOceyURF94";
+    const JWK_Y: &str = "XmCAygVTme4woYrxkBAzfWWRQTPVIrM8_4XXxshC7vw";
+
+    fn state(store: Arc<dyn Store>, oidc: Option<OidcVerifier>) -> Arc<AppState> {
+        Arc::new(AppState::new(
+            store,
             SigningKey::from_bytes(&[1u8; 32]),
-            "admin-secret",
-        ));
+            AuthConfig {
+                break_glass: Some(BreakGlass::new(ADMIN, None).unwrap()),
+                oidc,
+            },
+        ))
+    }
+
+    fn app() -> (Router, Arc<AppState>) {
+        let st = state(Arc::new(MemoryStore::new()), None);
         (router(st.clone()), st)
     }
 
@@ -432,10 +774,13 @@ mod tests {
         )
     }
 
+    fn j(b: &[u8]) -> serde_json::Value {
+        serde_json::from_slice(b).unwrap()
+    }
+
     #[tokio::test]
-    async fn full_flow() {
+    async fn full_flow_with_break_glass() {
         let (app, st) = app();
-        // admin endpoints reject missing/wrong credentials
         assert_eq!(
             call(&app, "GET", "/v1/admin/rules", None, None).await.0,
             StatusCode::UNAUTHORIZED
@@ -451,15 +796,12 @@ mod tests {
             &app,
             "POST",
             "/v1/admin/enrollment-tokens",
-            Some("admin-secret"),
+            Some(ADMIN),
             Some(json!({"max_uses": 1})),
         )
         .await;
         assert_eq!(s, StatusCode::OK);
-        let token = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["token"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let token = j(&b)["token"].as_str().unwrap().to_string();
 
         let (s, _, b) = call(
             &app,
@@ -470,7 +812,7 @@ mod tests {
         )
         .await;
         assert_eq!(s, StatusCode::OK);
-        let dev: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        let dev = j(&b);
         let dsecret = dev["device_secret"].as_str().unwrap().to_string();
         assert_eq!(
             call(
@@ -484,18 +826,23 @@ mod tests {
             .0,
             StatusCode::UNAUTHORIZED
         );
-
         assert_eq!(
             call(&app, "GET", "/v1/bundle", None, None).await.0,
             StatusCode::UNAUTHORIZED
         );
+        // a device credential must not open the admin API
+        assert_eq!(
+            call(&app, "GET", "/v1/admin/rules", Some(&dsecret), None)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
 
-        // add a rule, pull bundle, verify signature and content
         let (s, _, _) = call(
             &app,
             "POST",
             "/v1/admin/rules",
-            Some("admin-secret"),
+            Some(ADMIN),
             Some(json!({"action": "block", "pattern": "ads.example.com"})),
         )
         .await;
@@ -506,7 +853,6 @@ mod tests {
         assert_eq!(bundle.network.custom_block, vec!["ads.example.com"]);
         let etag = h.get("etag").unwrap().to_str().unwrap().to_string();
 
-        // conditional pull
         let req = Request::builder()
             .uri("/v1/bundle")
             .header("authorization", format!("Bearer {dsecret}"))
@@ -518,21 +864,18 @@ mod tests {
             StatusCode::NOT_MODIFIED
         );
 
-        // simulation
-        let (_, _, b) = call(&app, "POST", "/v1/admin/simulate", Some("admin-secret"),
+        let (_, _, b) = call(&app, "POST", "/v1/admin/simulate", Some(ADMIN),
             Some(json!({"host": "x.ads.example.com", "extra_rules": [{"action": "allow", "pattern": "x.ads.example.com"}]}))).await;
-        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
-        assert_eq!(v["current"]["action"], "Block");
-        assert_eq!(v["with_changes"]["action"], "Allow");
+        assert_eq!(j(&b)["current"]["action"], "Block");
+        assert_eq!(j(&b)["with_changes"]["action"], "Allow");
 
-        // revoke device -> 401
         let id = dev["device_id"].as_str().unwrap();
         assert_eq!(
             call(
                 &app,
                 "DELETE",
                 &format!("/v1/admin/devices/{id}"),
-                Some("admin-secret"),
+                Some(ADMIN),
                 None
             )
             .await
@@ -546,20 +889,228 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
 
-        // audit chain intact and secrets absent from it
-        let (s, _, _) = call(
+        // audit: chain intact, secrets absent, every break-glass use recorded
+        assert_eq!(
+            call(&app, "GET", "/v1/admin/audit/verify", Some(ADMIN), None)
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let (_, _, b) = call(&app, "GET", "/v1/admin/audit", Some(ADMIN), None).await;
+        let text = String::from_utf8(b).unwrap();
+        assert!(!text.contains(&token) && !text.contains(&dsecret) && !text.contains(ADMIN));
+        assert!(text.contains("rule.create") && text.contains("device.revoke"));
+        assert!(
+            text.matches("auth.break_glass").count() >= 4,
+            "break-glass use must be audited"
+        );
+        assert!(text.contains("\"actor\":\"break-glass\""));
+    }
+
+    #[tokio::test]
+    async fn expired_break_glass_is_rejected() {
+        let st = Arc::new(AppState::new(
+            Arc::new(MemoryStore::new()),
+            SigningKey::from_bytes(&[1u8; 32]),
+            AuthConfig {
+                break_glass: Some(BreakGlass::new(ADMIN, Some(Duration::ZERO)).unwrap()),
+                oidc: None,
+            },
+        ));
+        let app = router(st);
+        assert_eq!(
+            call(&app, "GET", "/v1/me", Some(ADMIN), None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn api_tokens_are_tenant_scoped_and_cannot_escalate() {
+        let (app, _) = app();
+        let (_, _, b) = call(
+            &app,
+            "POST",
+            "/v1/admin/tenants",
+            Some(ADMIN),
+            Some(json!({"slug": "acme", "name": "Acme"})),
+        )
+        .await;
+        let acme = j(&b)["id"].as_str().unwrap().to_string();
+        let (_, _, b) = call(
+            &app,
+            "POST",
+            "/v1/admin/tenants",
+            Some(ADMIN),
+            Some(json!({"slug": "beta", "name": "Beta"})),
+        )
+        .await;
+        let beta = j(&b)["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/v1/admin/tenants",
+                Some(ADMIN),
+                Some(json!({"slug": "acme", "name": "dup"}))
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+
+        // admin token for acme
+        let (s, _, b) = call(
+            &app,
+            "POST",
+            "/v1/admin/api-tokens",
+            Some(ADMIN),
+            Some(json!({"tenant_id": acme, "name": "ops", "role": "admin"})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+        let admin_tok = j(&b)["token"].as_str().unwrap().to_string();
+        // editor token for acme, created BY the acme admin
+        let (s, _, b) = call(
+            &app,
+            "POST",
+            "/v1/admin/api-tokens",
+            Some(&admin_tok),
+            Some(json!({"name": "ci", "role": "editor"})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+        let editor_tok = j(&b)["token"].as_str().unwrap().to_string();
+
+        // tenant admin cannot create owner tokens, nor touch tenant lifecycle, nor other tenants
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/v1/admin/api-tokens",
+                Some(&admin_tok),
+                Some(json!({"name": "x", "role": "owner"}))
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/v1/admin/tenants",
+                Some(&admin_tok),
+                Some(json!({"slug": "evil", "name": "x"}))
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                &app,
+                "GET",
+                &format!("/v1/admin/rules?tenant_id={beta}"),
+                Some(&admin_tok),
+                None
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&app, "GET", "/v1/admin/users", Some(&admin_tok), None)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+
+        // editor: can write rules (defaults to its own tenant), cannot read audit, cannot mint tokens
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/v1/admin/rules",
+                Some(&editor_tok),
+                Some(json!({"action": "block", "pattern": "a.test"}))
+            )
+            .await
+            .0,
+            StatusCode::CREATED
+        );
+        let (_, _, b) = call(&app, "GET", "/v1/admin/rules", Some(&editor_tok), None).await;
+        assert_eq!(j(&b).as_array().unwrap().len(), 1);
+        assert_eq!(
+            call(
+                &app,
+                "GET",
+                &format!("/v1/admin/rules?tenant_id={beta}"),
+                Some(&editor_tok),
+                None
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&app, "GET", "/v1/admin/audit", Some(&editor_tok), None)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/v1/admin/api-tokens",
+                Some(&editor_tok),
+                Some(json!({"name": "y", "role": "viewer"}))
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+
+        // the rule landed in acme, not in the default tenant
+        let (_, _, b) = call(
             &app,
             "GET",
-            "/v1/admin/audit/verify",
-            Some("admin-secret"),
+            &format!("/v1/admin/rules?tenant_id={acme}"),
+            Some(ADMIN),
             None,
         )
         .await;
-        assert_eq!(s, StatusCode::OK);
-        let (_, _, b) = call(&app, "GET", "/v1/admin/audit", Some("admin-secret"), None).await;
-        let text = String::from_utf8(b).unwrap();
-        assert!(!text.contains(&token) && !text.contains(&dsecret));
-        assert!(text.contains("rule.create") && text.contains("device.revoke"));
+        assert_eq!(j(&b).as_array().unwrap().len(), 1);
+        let (_, _, b) = call(&app, "GET", "/v1/admin/rules", Some(ADMIN), None).await;
+        assert_eq!(j(&b).as_array().unwrap().len(), 0);
+
+        // revocation
+        let (_, _, b) = call(&app, "GET", "/v1/admin/api-tokens", Some(&admin_tok), None).await;
+        let ed_id = j(&b)
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "ci")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            call(
+                &app,
+                "DELETE",
+                &format!("/v1/admin/api-tokens/{ed_id}"),
+                Some(&admin_tok),
+                None
+            )
+            .await
+            .0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(&app, "GET", "/v1/me", Some(&editor_tok), None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[tokio::test]
@@ -610,20 +1161,252 @@ mod tests {
             call(&app, "GET", "/v1/admin/lists", None, None).await.0,
             StatusCode::UNAUTHORIZED
         );
-        let (s, _, body) = call(&app, "GET", "/v1/admin/lists", Some("admin-secret"), None).await;
+        let (s, _, body) = call(&app, "GET", "/v1/admin/lists", Some(ADMIN), None).await;
         assert_eq!(s, StatusCode::OK);
         assert!(String::from_utf8(body).unwrap().contains("\"MIT\""));
+        assert_eq!(
+            call(&app, "POST", "/v1/admin/lists/refresh", Some(ADMIN), None)
+                .await
+                .0,
+            StatusCode::ACCEPTED
+        );
+    }
+
+    // ------------------------------------------------------------ OIDC
+
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+
+    async fn mock_idp() -> String {
+        let jwk = json!({"kty": "EC", "crv": "P-256", "x": JWK_X, "y": JWK_Y, "kid": "k1", "use": "sig", "alg": "ES256"});
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let (b2, jwk2) = (base.clone(), jwk.clone());
+        let app = Router::new()
+            .route(
+                "/.well-known/openid-configuration",
+                get(move || {
+                    let b = b2.clone();
+                    async move { Json(json!({"issuer": b, "jwks_uri": format!("{b}/jwks")})) }
+                }),
+            )
+            .route(
+                "/jwks",
+                get(move || {
+                    let k = jwk2.clone();
+                    async move { Json(json!({"keys": [k]})) }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        base
+    }
+
+    fn jwt(issuer: &str, aud: &str, sub: &str, exp_delta: i64, pem: &str, kid: &str) -> String {
+        let exp = (now() + exp_delta) as u64;
+        let mut h = Header::new(Algorithm::ES256);
+        h.kid = Some(kid.into());
+        encode(&h, &json!({"iss": issuer, "aud": aud, "sub": sub, "email": format!("{sub}@example.com"), "exp": exp}),
+            &EncodingKey::from_ec_pem(pem.as_bytes()).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn oidc_login_roles_from_bindings() {
+        let idp = mock_idp().await;
+        let verifier = OidcVerifier::new(OidcConfig {
+            issuer: idp.clone(),
+            audience: "hygeia-api".into(),
+            leeway_secs: 5,
+            allow_insecure_http: true,
+        })
+        .unwrap();
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        let st = state(store.clone(), Some(verifier));
+        let app = router(st);
+
+        let good = jwt(&idp, "hygeia-api", "alice", 300, EC_KEY, "k1");
+        // authenticated, but no roles yet: no access to anything
+        assert_eq!(
+            call(&app, "GET", "/v1/me", Some(&good), None).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(&app, "GET", "/v1/admin/rules", Some(&good), None)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&app, "GET", "/v1/admin/lists", Some(&good), None)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+
+        // operator (break-glass) binds alice as editor of the default tenant
+        let user = store.upsert_user(&idp, "alice", None).await.unwrap();
+        let (s, _, _) = call(
+            &app,
+            "POST",
+            "/v1/admin/bindings",
+            Some(ADMIN),
+            Some(json!({"user_id": user.id, "tenant_id": DEFAULT_TENANT, "role": "editor"})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
         assert_eq!(
             call(
                 &app,
                 "POST",
-                "/v1/admin/lists/refresh",
-                Some("admin-secret"),
-                None
+                "/v1/admin/rules",
+                Some(&good),
+                Some(json!({"action": "block", "pattern": "x.test"}))
             )
             .await
             .0,
-            StatusCode::ACCEPTED
+            StatusCode::CREATED
         );
+        assert_eq!(
+            call(&app, "GET", "/v1/admin/audit", Some(&good), None)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        let (_, _, b) = call(&app, "GET", "/v1/me", Some(&good), None).await;
+        assert_eq!(j(&b)["kind"], "user");
+        // audit trail names the human, not a shared secret
+        let (_, _, b) = call(&app, "GET", "/v1/admin/audit", Some(ADMIN), None).await;
+        assert!(
+            String::from_utf8(b)
+                .unwrap()
+                .contains(&format!("user:{}", user.id))
+        );
+
+        // editor cannot grant roles
+        let bob = store.upsert_user(&idp, "bob", None).await.unwrap();
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/v1/admin/bindings",
+                Some(&good),
+                Some(json!({"user_id": bob.id, "tenant_id": DEFAULT_TENANT, "role": "viewer"}))
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+
+        // tenant-scoped owner binding is refused; platform-wide owner via break-glass is fine
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/v1/admin/bindings",
+                Some(ADMIN),
+                Some(json!({"user_id": bob.id, "tenant_id": DEFAULT_TENANT, "role": "owner"}))
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/v1/admin/bindings",
+                Some(ADMIN),
+                Some(json!({"user_id": bob.id, "role": "owner"}))
+            )
+            .await
+            .0,
+            StatusCode::CREATED
+        );
+        let bob_tok = jwt(&idp, "hygeia-api", "bob", 300, EC_KEY, "k1");
+        assert_eq!(
+            call(&app, "GET", "/v1/admin/tenants", Some(&bob_tok), None)
+                .await
+                .0,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn oidc_rejects_bad_tokens() {
+        let idp = mock_idp().await;
+        let verifier = OidcVerifier::new(OidcConfig {
+            issuer: idp.clone(),
+            audience: "hygeia-api".into(),
+            leeway_secs: 5,
+            allow_insecure_http: true,
+        })
+        .unwrap();
+        let app = router(state(Arc::new(MemoryStore::new()), Some(verifier)));
+        let me = |t: String| {
+            let app = app.clone();
+            async move { call(&app, "GET", "/v1/me", Some(&t), None).await.0 }
+        };
+
+        assert_eq!(
+            me(jwt(&idp, "hygeia-api", "a", 300, EC_KEY, "k1")).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            me(jwt(&idp, "other-aud", "a", 300, EC_KEY, "k1")).await,
+            StatusCode::UNAUTHORIZED,
+            "wrong audience"
+        );
+        assert_eq!(
+            me(jwt(
+                "https://evil.example.com",
+                "hygeia-api",
+                "a",
+                300,
+                EC_KEY,
+                "k1"
+            ))
+            .await,
+            StatusCode::UNAUTHORIZED,
+            "wrong issuer"
+        );
+        assert_eq!(
+            me(jwt(&idp, "hygeia-api", "a", -3600, EC_KEY, "k1")).await,
+            StatusCode::UNAUTHORIZED,
+            "expired"
+        );
+        assert_eq!(
+            me(jwt(&idp, "hygeia-api", "a", 300, EC_KEY_OTHER, "k1")).await,
+            StatusCode::UNAUTHORIZED,
+            "signed by another key"
+        );
+        assert_eq!(
+            me(jwt(&idp, "hygeia-api", "a", 300, EC_KEY, "unknown-kid")).await,
+            StatusCode::UNAUTHORIZED,
+            "unknown kid"
+        );
+
+        // alg=none and HS256 forgeries (public key material used as HMAC secret)
+        let b64 = |s: &str| {
+            use base64::Engine;
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s)
+        };
+        let claims = b64(
+            &json!({"iss": idp, "aud": "hygeia-api", "sub": "a", "exp": now() + 300}).to_string(),
+        );
+        let none = format!(
+            "{}.{}.",
+            b64(r#"{"alg":"none","typ":"JWT","kid":"k1"}"#),
+            claims
+        );
+        assert_eq!(me(none).await, StatusCode::UNAUTHORIZED);
+        let hs = encode(
+            &Header {
+                kid: Some("k1".into()),
+                ..Header::new(Algorithm::HS256)
+            },
+            &json!({"iss": idp, "aud": "hygeia-api", "sub": "a", "exp": now() + 300}),
+            &EncodingKey::from_secret(JWK_X.as_bytes()),
+        )
+        .unwrap();
+        assert_eq!(me(hs).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(me("not.a.jwt".into()).await, StatusCode::UNAUTHORIZED);
     }
 }

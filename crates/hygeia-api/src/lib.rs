@@ -4,10 +4,14 @@
 //! parameters, on the data-plane endpoints (`/v1/enroll`, `/v1/bundle`).
 //! Admin endpoints use a static bearer token for now; OIDC + RBAC replace it.
 
+pub mod auth;
 pub mod build;
+pub mod oidc;
 mod routes;
 mod state;
 
+pub use auth::{AuthConfig, BreakGlass, Principal};
+pub use oidc::{OidcConfig, OidcVerifier};
 pub use routes::router;
 pub use state::{AppState, DEFAULT_GROUP, DEFAULT_TENANT, now};
 

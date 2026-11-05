@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use ed25519_dalek::SigningKey;
-use hygeia_api::{AppState, DEFAULT_GROUP, DEFAULT_TENANT};
+use hygeia_api::{
+    AppState, AuthConfig, BreakGlass, DEFAULT_GROUP, DEFAULT_TENANT, OidcConfig, OidcVerifier,
+};
 use hygeia_core::{Ruleset, SignedBundle};
 use hygeia_dns::{BlockMode, DnsConfig};
 use hygeia_lists::{HttpFetcher, Manager};
@@ -30,11 +32,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => config::Config::default(),
     };
 
-    let admin_token = std::env::var("HYGEIA_ADMIN_TOKEN").unwrap_or_else(|_| {
-        let t = format!("hyg_adm_{}", rand_hex(24));
-        tracing::warn!("HYGEIA_ADMIN_TOKEN not set; generated one-shot admin token: {t}");
-        t
-    });
     let signing_key = match std::env::var("HYGEIA_SIGNING_KEY") {
         Ok(h) if h.len() == 64 => {
             let mut seed = [0u8; 32];
@@ -69,7 +66,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     store.bootstrap_default().await?;
-    let state = Arc::new(AppState::new(store, signing_key, &admin_token));
+    let auth = build_auth(&cfg, &store).await?;
+    let state = Arc::new(AppState::new(store, signing_key, auth));
 
     // Data plane: DNS follows the control plane by pulling the signed bundle.
     if cfg.dns.enabled {
@@ -171,4 +169,86 @@ async fn axum_serve(
     })
     .await?;
     Ok(())
+}
+
+/// Assemble authentication from config + environment. Secrets never come from the file.
+async fn build_auth(
+    cfg: &config::Config,
+    store: &Arc<dyn Store>,
+) -> Result<AuthConfig, Box<dyn std::error::Error>> {
+    use config::Environment;
+    let mut env = cfg.auth.environment;
+    if let Ok(v) = std::env::var("HYGEIA_ENVIRONMENT") {
+        env = match v.as_str() {
+            "production" => Environment::Production,
+            "staging" => Environment::Staging,
+            "dev" => Environment::Dev,
+            other => return Err(format!("HYGEIA_ENVIRONMENT: unknown value {other:?}").into()),
+        };
+    }
+    let bg_wanted = cfg.auth.break_glass.enabled
+        || (env == Environment::Dev && std::env::var("HYGEIA_BREAK_GLASS_TOKEN").is_ok());
+
+    let break_glass = if bg_wanted || env == Environment::Dev {
+        if env == Environment::Production {
+            return Err("break-glass is not allowed when environment = \"production\"".into());
+        }
+        let secret =
+            match std::env::var("HYGEIA_BREAK_GLASS_TOKEN") {
+                Ok(t) => t,
+                Err(_) if env == Environment::Dev => {
+                    let t = format!("hyg_bg_{}", rand_hex(24));
+                    tracing::warn!("DEV: generated a throwaway break-glass token: {t}");
+                    t
+                }
+                Err(_) => return Err(
+                    "break-glass enabled in staging: set HYGEIA_BREAK_GLASS_TOKEN (>= 32 chars)"
+                        .into(),
+                ),
+            };
+        let ttl = (cfg.auth.break_glass.ttl_hours > 0)
+            .then(|| Duration::from_secs(cfg.auth.break_glass.ttl_hours * 3600));
+        let bg = BreakGlass::new(&secret, ttl)?;
+        tracing::warn!(
+            ?env,
+            ttl_hours = cfg.auth.break_glass.ttl_hours,
+            "BREAK-GLASS access is ENABLED; every use is audited"
+        );
+        if !cfg.api.listen.starts_with("127.") && !cfg.api.listen.starts_with("localhost") {
+            tracing::warn!(listen = %cfg.api.listen, "break-glass on a non-loopback listener: restrict it at the network layer");
+        }
+        Some(bg)
+    } else {
+        None
+    };
+
+    let o = &cfg.auth.oidc;
+    let oidc = if o.issuer.is_empty() {
+        None
+    } else {
+        if o.audience.is_empty() {
+            return Err("auth.oidc.audience must not be empty".into());
+        }
+        let v = OidcVerifier::new(OidcConfig {
+            issuer: o.issuer.clone(),
+            audience: o.audience.clone(),
+            leeway_secs: o.leeway_secs,
+            allow_insecure_http: o.allow_insecure_http,
+        })?;
+        for sub in &o.bootstrap_owners {
+            let u = store.upsert_user(&o.issuer, sub, None).await?;
+            store
+                .bind_role(&u.id, None, hygeia_store::rbac::Role::Owner)
+                .await?;
+            tracing::warn!(subject = %sub, "bootstrap owner ensured");
+        }
+        Some(v)
+    };
+
+    if break_glass.is_none() && oidc.is_none() {
+        tracing::warn!(
+            "no admin authentication configured (set [auth.oidc], or environment = \"dev\"/\"staging\" with break-glass): the admin API is unusable"
+        );
+    }
+    Ok(AuthConfig { break_glass, oidc })
 }

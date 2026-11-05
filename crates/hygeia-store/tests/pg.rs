@@ -38,11 +38,11 @@ async fn pg_store_conformance() {
         return;
     };
     let st = PgStore::connect(&env.app_db).await.unwrap();
-    let ta = st.create_tenant("a", "A").await.unwrap();
-    let tb = st.create_tenant("b", "B").await.unwrap();
-    let ga = st.create_group(&ta, "g1").await.unwrap();
-    let ga2 = st.create_group(&ta, "g2").await.unwrap();
-    let gb = st.create_group(&tb, "g1").await.unwrap();
+    let ta = st.create_tenant("a", "A").await.unwrap().id;
+    let tb = st.create_tenant("b", "B").await.unwrap().id;
+    let ga = st.create_group(&ta, "g1").await.unwrap().id;
+    let ga2 = st.create_group(&ta, "g2").await.unwrap().id;
+    let gb = st.create_group(&tb, "g1").await.unwrap().id;
     conformance::run(&st, (&ta, &ga, &ga2), (&tb, &gb)).await;
 
     // cross-tenant group reference is rejected by the composite FK
@@ -62,13 +62,20 @@ async fn pg_store_conformance() {
 }
 
 #[tokio::test]
+async fn pg_identity_conformance() {
+    let Some(env) = setup().await else { return };
+    let st = PgStore::connect(&env.app_db).await.unwrap();
+    conformance::run_identity(&st).await;
+}
+
+#[tokio::test]
 async fn pg_rls_and_audit_immutability() {
     let Some(env) = setup().await else { return };
     let st = PgStore::connect(&env.app_db).await.unwrap();
-    let ta = st.create_tenant("a", "A").await.unwrap();
-    let tb = st.create_tenant("b", "B").await.unwrap();
-    let ga = st.create_group(&ta, "g").await.unwrap();
-    let gb = st.create_group(&tb, "g").await.unwrap();
+    let ta = st.create_tenant("a", "A").await.unwrap().id;
+    let tb = st.create_tenant("b", "B").await.unwrap().id;
+    let ga = st.create_group(&ta, "g").await.unwrap().id;
+    let gb = st.create_group(&tb, "g").await.unwrap().id;
     for (t, g) in [(&ta, &ga), (&tb, &gb)] {
         st.add_rule(hygeia_store::Rule {
             id: String::new(),

@@ -29,7 +29,7 @@ flowchart TD
 | `hygeia-core` | Done: trie matcher, hosts/domains/ABP(domain-level) parsers, policy, cosmetic model, signed bundle. Tested; builds for wasm32 |
 | `hygeia-lists` | Catalogue (HaGeZi, StevenBlack, URLhaus, EasyList/EasyPrivacy, uBlock filters), https-only downloader with ETag/304 and size cap, parsing at refresh time, shrink/empty guards, per-source status. Missing: scheduler persistence, per-tenant source selection, AdGuard/other scriptlet dialects |
 | `hygeia-audit` | Done: hash chain, verify, CEF. Missing: syslog/OTLP sinks, external head anchoring |
-| `hygeia-store` | PostgreSQL (sqlx) is the production store: RLS tenant isolation, per-tenant audit chain, composite FKs. RBAC model (roles/permissions, `users`, `role_bindings`, `api_tokens` tables). In-memory store for tests. Missing: RBAC enforcement in the API (needs OIDC), list catalogue/subscription queries, sqlx offline cache |
+| `hygeia-store` | PostgreSQL (sqlx) is the production store: RLS tenant isolation, per-tenant audit chain, composite FKs. tenants/groups, users, role bindings, API tokens. In-memory store for tests. Missing: list catalogue/subscription queries, sqlx offline cache |
 | `hygeia-api` | Enroll, bundle (ETag/304), rules CRUD, simulate (dry-run), audit + verify. Static admin token. `/v1/admin/lists` (+`/refresh`). Missing: OIDC + RBAC wiring, OpenAPI (utoipa), gRPC, groups/time windows, regex rules |
 | `hygeia-dns` | UDP server, block via NXDOMAIN/null IP, plain UDP upstream. Missing: TCP, DoT/DoH/DoQ, DoT upstream, tenant resolution, query log, metrics |
 | `hygeia-proxy` | Skeleton (CONNECT host decision) |
@@ -69,10 +69,44 @@ Licenses in the catalogue are GPL-3.0 (HaGeZi, uBlock filters), GPL-3.0-or-later
 
 Live check against upstream: `cargo test -p hygeia-lists --test live -- --ignored --nocapture`.
 
+## Authentication
+
+Admin API credentials (`Authorization: Bearer ...`), all authorised through roles (`owner` platform-wide, `admin`, `editor`, `viewer`, `auditor`; matrix in `crates/hygeia-store/src/rbac.rs`):
+
+| Credential | Identity / scope | Use |
+|---|---|---|
+| OIDC JWT | `(iss, sub)` → roles from `role_bindings`, per tenant or platform-wide | humans (the admin UI runs the PKCE flow with the IdP and sends the token) |
+| `hyg_api_...` | one tenant, one role, optional expiry, revocable | automation |
+| break-glass | everything (owner-equivalent) | **staging/dev only**, see below |
+
+Device credentials (`hyg_dev_...`) never open the admin API.
+
+- A user created by a first OIDC login has **no roles** until bound. Identity is `(iss, sub)`: the e-mail claim is never used for authorisation. Algorithms are asymmetric only (RS*/ES*), issuer and audience are mandatory, `none`/HS* forgeries are rejected (tested).
+- No privilege escalation: a principal can only grant roles whose permissions it holds in that scope; `owner` exists only platform-wide and a tenant-scoped "owner" gains no tenant-management rights.
+- First owner in production: `auth.oidc.bootstrap_owners = ["<sub claim>"]` grants the platform `owner` role at startup (idempotent, additive).
+
+### Break-glass (staging)
+
+A single static credential for environments where OIDC is not available:
+
+```toml
+[auth]
+environment = "staging"        # production (default) refuses to start with break-glass enabled
+[auth.break_glass]
+enabled = true
+ttl_hours = 12                 # the credential dies this long after process start (0 = no limit)
+```
+
+```bash
+export HYGEIA_BREAK_GLASS_TOKEN="$(openssl rand -hex 24)"   # >= 32 chars; secrets are never read from the file
+```
+
+Properties: refused when `environment = "production"` (also if `HYGEIA_ENVIRONMENT` tries to override it); secret length enforced; constant-time comparison on SHA-256 digests; 200 ms delay on failed authentication; **every request made with it is written to the audit chain of the affected tenant** (`auth.break_glass`, actor `break-glass`) and logged at WARN. It is a shared secret: restrict the listener at the network layer, rotate it after use, and prefer a time-limited process. `environment = "dev"` generates a throwaway token if none is given.
+
 ## Try it
 
 ```bash
-HYGEIA_ADMIN_TOKEN=changeme cargo run -p hygeia
+HYGEIA_ENVIRONMENT=dev cargo run -p hygeia     # prints a throwaway break-glass token
 ```
 
 Defaults: API `127.0.0.1:8080`, DNS `127.0.0.1:5353` (UDP), upstream `9.9.9.9:53`. Optional `hygeia.toml` (every section optional):
@@ -101,7 +135,8 @@ Known limitation: the bundle cache is per process, so with several API replicas 
 Set `HYGEIA_SIGNING_KEY` (64 hex chars) for a stable bundle key; otherwise an ephemeral one is generated at start.
 
 ```bash
-curl -XPOST localhost:8080/v1/admin/rules -H 'authorization: Bearer changeme' \
+# TOKEN = the break-glass token printed at startup
+curl -XPOST localhost:8080/v1/admin/rules -H "authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' -d '{"action":"block","pattern":"ads.example.com"}'
 dig @127.0.0.1 -p 5353 x.ads.example.com   # NXDOMAIN after the next bundle refresh (<=5s)
 ```

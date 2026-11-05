@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const { chromium } = require('playwright');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const ADMIN = 'e2e-admin';
+const ADMIN = 'e2e-break-glass-secret-0123456789abcdef';
 const API = 'http://127.0.0.1:18080';
 
 const listen = (handler, port) => new Promise((res) => { const s = http.createServer(handler).listen(port, '127.0.0.1', () => res(s)); });
@@ -51,6 +51,10 @@ const cfg = path.join(dir, 'hygeia.toml');
 writeFileSync(cfg, `
 [api]
 listen = "127.0.0.1:18080"
+[auth]
+environment = "staging"
+[auth.break_glass]
+enabled = true
 [dns]
 enabled = false
 [lists]
@@ -73,7 +77,7 @@ license = "CC0-1.0"
 attribution = "e2e"
 network = true
 `);
-const hy = spawn(path.join(root, 'target/debug/hygeia'), [cfg], { env: { ...process.env, HYGEIA_ADMIN_TOKEN: ADMIN }, stdio: 'inherit' });
+const hy = spawn(path.join(root, 'target/debug/hygeia'), [cfg], { env: { ...process.env, HYGEIA_BREAK_GLASS_TOKEN: ADMIN }, stdio: 'inherit' });
 const cleanup = async () => { hy.kill(); lists.close(); content.close(); };
 process.on('exit', () => hy.kill());
 

@@ -7,9 +7,11 @@ use hygeia_audit::{Draft, Event, GENESIS};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::{Postgres, Row, Transaction};
 
+use crate::rbac::Role;
 use crate::{
-    AuditStatus, DEFAULT_GROUP_ID, DEFAULT_TENANT_ID, Device, EnrollmentToken, PREFIX_DEVICE,
-    PREFIX_ENROLL, Result, Rule, RuleAction, Store, StoreError, hash_secret, new_id, new_secret,
+    ApiToken, AuditStatus, Binding, DEFAULT_GROUP_ID, DEFAULT_TENANT_ID, Device, EnrollmentToken,
+    Group, PREFIX_API, PREFIX_DEVICE, PREFIX_ENROLL, Result, Rule, RuleAction, Store, StoreError,
+    Tenant, User, hash_secret, new_id, new_secret,
 };
 
 #[derive(Clone)]
@@ -20,8 +22,10 @@ pub struct PgStore {
 fn map_err(e: sqlx::Error) -> StoreError {
     if let sqlx::Error::Database(d) = &e {
         // invalid uuid text, FK violation, check violation: caller-supplied ids that don't resolve
-        if matches!(d.code().as_deref(), Some("22P02" | "23503" | "23514")) {
-            return StoreError::NotFound;
+        match d.code().as_deref() {
+            Some("22P02" | "23503" | "23514") => return StoreError::NotFound,
+            Some("23505") => return StoreError::Conflict,
+            _ => {}
         }
     }
     StoreError::Backend(e.to_string())
@@ -65,32 +69,6 @@ impl PgStore {
             .map_err(map_err)?;
         Ok(tx)
     }
-
-    pub async fn create_tenant(&self, slug: &str, name: &str) -> Result<String> {
-        let id = new_id();
-        sqlx::query("insert into tenants (id, slug, name) values ($1::uuid, $2, $3)")
-            .bind(&id)
-            .bind(slug)
-            .bind(name)
-            .execute(&self.pool)
-            .await
-            .map_err(map_err)?;
-        Ok(id)
-    }
-
-    pub async fn create_group(&self, tenant_id: &str, name: &str) -> Result<String> {
-        let id = new_id();
-        let mut tx = self.tenant_tx(tenant_id).await?;
-        sqlx::query("insert into groups (id, tenant_id, name) values ($1::uuid, $2::uuid, $3)")
-            .bind(&id)
-            .bind(tenant_id)
-            .bind(name)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_err)?;
-        tx.commit().await.map_err(map_err)?;
-        Ok(id)
-    }
 }
 
 fn device_from(r: &sqlx::postgres::PgRow, secret_hash: [u8; 32]) -> Device {
@@ -103,6 +81,15 @@ fn device_from(r: &sqlx::postgres::PgRow, secret_hash: [u8; 32]) -> Device {
         last_seen: r.get("last_seen"),
         revoked: r.get("revoked"),
     }
+}
+
+fn binding_from(r: &sqlx::postgres::PgRow) -> Option<Binding> {
+    Some(Binding {
+        id: r.get(0),
+        user_id: r.get(1),
+        tenant_id: r.get(2),
+        role: r.get::<String, _>(3).parse().ok()?,
+    })
 }
 
 fn rule_from(r: &sqlx::postgres::PgRow) -> Rule {
@@ -366,6 +353,274 @@ impl Store for PgStore {
         .map_err(map_err)?;
         tx.commit().await.map_err(map_err)?;
         Ok(v as u64)
+    }
+
+    async fn create_tenant(&self, slug: &str, name: &str) -> Result<Tenant> {
+        let id = new_id();
+        sqlx::query("insert into tenants (id, slug, name) values ($1::uuid, $2, $3)")
+            .bind(&id)
+            .bind(slug)
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .map_err(map_err)?;
+        Ok(Tenant {
+            id,
+            slug: slug.into(),
+            name: name.into(),
+        })
+    }
+
+    async fn list_tenants(&self) -> Result<Vec<Tenant>> {
+        let rows =
+            sqlx::query("select id::text, slug, name from tenants order by created_at, slug")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(map_err)?;
+        Ok(rows
+            .iter()
+            .map(|r| Tenant {
+                id: r.get(0),
+                slug: r.get(1),
+                name: r.get(2),
+            })
+            .collect())
+    }
+
+    async fn create_group(&self, tenant_id: &str, name: &str) -> Result<Group> {
+        let id = new_id();
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        sqlx::query("insert into groups (id, tenant_id, name) values ($1::uuid, $2::uuid, $3)")
+            .bind(&id)
+            .bind(tenant_id)
+            .bind(name)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_err)?;
+        tx.commit().await.map_err(map_err)?;
+        Ok(Group {
+            id,
+            tenant_id: tenant_id.into(),
+            name: name.into(),
+        })
+    }
+
+    async fn list_groups(&self, tenant_id: &str) -> Result<Vec<Group>> {
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        let rows = sqlx::query("select id::text, tenant_id::text, name from groups order by name")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(map_err)?;
+        tx.commit().await.map_err(map_err)?;
+        Ok(rows
+            .iter()
+            .map(|r| Group {
+                id: r.get(0),
+                tenant_id: r.get(1),
+                name: r.get(2),
+            })
+            .collect())
+    }
+
+    async fn upsert_user(&self, issuer: &str, subject: &str, email: Option<&str>) -> Result<User> {
+        let row = sqlx::query(
+            "insert into users (id, oidc_issuer, oidc_subject, email) values ($1::uuid, $2, $3, $4)
+             on conflict (oidc_issuer, oidc_subject) do update set email = coalesce(excluded.email, users.email)
+             returning id::text, email, disabled_at is not null",
+        )
+        .bind(new_id())
+        .bind(issuer)
+        .bind(subject)
+        .bind(email)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(User {
+            id: row.get(0),
+            issuer: issuer.into(),
+            subject: subject.into(),
+            email: row.get(1),
+            disabled: row.get(2),
+        })
+    }
+
+    async fn list_users(&self) -> Result<Vec<User>> {
+        let rows = sqlx::query("select id::text, oidc_issuer, oidc_subject, email, disabled_at is not null from users order by created_at")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_err)?;
+        Ok(rows
+            .iter()
+            .map(|r| User {
+                id: r.get(0),
+                issuer: r.get(1),
+                subject: r.get(2),
+                email: r.get(3),
+                disabled: r.get(4),
+            })
+            .collect())
+    }
+
+    async fn bindings_for_user(&self, user_id: &str) -> Result<Vec<Binding>> {
+        let rows = sqlx::query("select id::text, user_id::text, tenant_id::text, role from role_bindings where user_id = $1::uuid")
+            .bind(user_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_err)?;
+        Ok(rows.iter().filter_map(binding_from).collect())
+    }
+
+    async fn list_bindings(&self, tenant_id: Option<&str>) -> Result<Vec<Binding>> {
+        let rows = sqlx::query(
+            "select id::text, user_id::text, tenant_id::text, role from role_bindings
+             where tenant_id is not distinct from $1::uuid order by id",
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(rows.iter().filter_map(binding_from).collect())
+    }
+
+    async fn bind_role(
+        &self,
+        user_id: &str,
+        tenant_id: Option<&str>,
+        role: Role,
+    ) -> Result<Binding> {
+        let row = sqlx::query(
+            "insert into role_bindings (id, user_id, tenant_id, role) values ($1::uuid, $2::uuid, $3::uuid, $4)
+             on conflict (user_id, tenant_id, role) do update set role = excluded.role
+             returning id::text",
+        )
+        .bind(new_id())
+        .bind(user_id)
+        .bind(tenant_id)
+        .bind(role.as_str())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_err)?;
+        Ok(Binding {
+            id: row.get(0),
+            user_id: user_id.into(),
+            tenant_id: tenant_id.map(Into::into),
+            role,
+        })
+    }
+
+    async fn unbind_role(&self, binding_id: &str) -> Result<()> {
+        let n = sqlx::query("delete from role_bindings where id = $1::uuid")
+            .bind(binding_id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_err)?
+            .rows_affected();
+        if n == 0 {
+            Err(StoreError::NotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn create_api_token(
+        &self,
+        tenant_id: &str,
+        name: &str,
+        role: Role,
+        expires_at: Option<i64>,
+    ) -> Result<(ApiToken, String)> {
+        let (secret, hash) = new_secret(PREFIX_API);
+        let id = new_id();
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        // role CHECK constraint rejects 'owner' (platform-only) => NotFound via map_err
+        sqlx::query(
+            "insert into api_tokens (id, tenant_id, name, role, secret_hash, expires_at)
+             values ($1::uuid, $2::uuid, $3, $4, $5, to_timestamp($6::float8))",
+        )
+        .bind(&id)
+        .bind(tenant_id)
+        .bind(name)
+        .bind(role.as_str())
+        .bind(&hash[..])
+        .bind(expires_at.map(|e| e as f64))
+        .execute(&mut *tx)
+        .await
+        .map_err(map_err)?;
+        tx.commit().await.map_err(map_err)?;
+        Ok((
+            ApiToken {
+                id,
+                tenant_id: tenant_id.into(),
+                name: name.into(),
+                role,
+                expires_at,
+                revoked: false,
+            },
+            secret,
+        ))
+    }
+
+    async fn authenticate_api_token(&self, secret: &str, now: i64) -> Result<Option<ApiToken>> {
+        if !secret.starts_with(PREFIX_API) {
+            return Ok(None);
+        }
+        let row = sqlx::query("select id::text, tenant_id::text, name, role, expires_at from hyg_auth_api_token($1, to_timestamp($2::float8))")
+            .bind(&hash_secret(secret)[..])
+            .bind(now as f64)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_err)?;
+        Ok(row.and_then(|r| {
+            Some(ApiToken {
+                id: r.get(0),
+                tenant_id: r.get(1),
+                name: r.get(2),
+                role: r.get::<String, _>(3).parse().ok()?,
+                expires_at: r.get(4),
+                revoked: false,
+            })
+        }))
+    }
+
+    async fn revoke_api_token(&self, tenant_id: &str, id: &str) -> Result<()> {
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        let n = sqlx::query("update api_tokens set revoked_at = now() where id = $1::uuid")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_err)?
+            .rows_affected();
+        tx.commit().await.map_err(map_err)?;
+        if n == 0 {
+            Err(StoreError::NotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn list_api_tokens(&self, tenant_id: &str) -> Result<Vec<ApiToken>> {
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        let rows = sqlx::query(
+            "select id::text, tenant_id::text, name, role, extract(epoch from expires_at)::bigint, revoked_at is not null
+             from api_tokens order by created_at",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_err)?;
+        tx.commit().await.map_err(map_err)?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                Some(ApiToken {
+                    id: r.get(0),
+                    tenant_id: r.get(1),
+                    name: r.get(2),
+                    role: r.get::<String, _>(3).parse().ok()?,
+                    expires_at: r.get(4),
+                    revoked: r.get(5),
+                })
+            })
+            .collect())
     }
 
     async fn append_audit(&self, draft: Draft) -> Result<()> {
