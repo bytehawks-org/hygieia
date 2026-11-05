@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Windows installer for the Hygieia node (WiX Toolset v5).
+  Build:  packaging/windows/build-msi.ps1   (see docs/guides/node.md)
+
+  Install flow
+    1. files go to %ProgramFiles%\Hygieia, the tray starts at logon for every user
+    2. unattended defaults are written once (standalone, DNS off) unless a config already exists
+    3. the service is registered (LocalService) and started
+    4. interactive installs end with "Run the setup wizard": `hygeia-proxy setup`, elevated
+
+  Unattended:  msiexec /i hygeia-proxy.msi /qn MODE=connected UPSTREAM_URL=https://hygeia.example.com UPSTREAM_KEY=<64 hex>
+  Properties:  MODE (standalone|connected), UPSTREAM_URL, UPSTREAM_KEY, LOCAL_DNS (true|false), DNS_UPSTREAM (ip:port,...)
+
+  NOT RUN ON A REAL WINDOWS MACHINE YET: it is built by CI (advisory job) and awaits a first manual test.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="Hygieia node" Manufacturer="Hygieia" Version="$(Version)"
+           UpgradeCode="6f1d0c3e-8a52-4c1b-9d57-3b2f6a7c9e10" Scope="perMachine">
+    <MajorUpgrade Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="A newer version of the Hygieia node is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Public properties: the wizard writes nothing itself, `hygeia-proxy setup` validates them. -->
+    <Property Id="MODE" Value="standalone" />
+    <Property Id="UPSTREAM_URL" />
+    <Property Id="UPSTREAM_KEY" />
+    <Property Id="LOCAL_DNS" Value="false" />
+    <Property Id="DNS_UPSTREAM" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Hygieia">
+        <Directory Id="WEBDIR" Name="web">
+          <Files Include="$(WebDir)\**" />
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="MenuDir" Name="Hygieia" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="Binaries" Directory="INSTALLFOLDER">
+      <Component>
+        <File Id="ProxyExe" Source="$(ExeDir)\hygeia-proxy.exe" KeyPath="yes" />
+      </Component>
+      <Component>
+        <File Id="TrayExe" Source="$(TrayDir)\hygeia-tray.exe" KeyPath="yes" />
+      </Component>
+      <!-- Tray icon at logon for every user: status and a link to the dashboard, no credential. -->
+      <Component>
+        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="HygieiaTray"
+                       Type="string" Value="&quot;[INSTALLFOLDER]hygeia-tray.exe&quot;" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="Shortcuts" Directory="MenuDir">
+      <Component>
+        <Shortcut Id="WizardShortcut" Name="Hygieia setup wizard"
+                  Description="Choose standalone or connected mode and optional local DNS"
+                  Target="[System64Folder]WindowsPowerShell\v1.0\powershell.exe"
+                  Arguments="-NoProfile -Command &quot;Start-Process -Verb RunAs -FilePath '[INSTALLFOLDER]hygeia-proxy.exe' -ArgumentList 'setup --force --restart-service --pause'&quot;" />
+        <RemoveFolder Id="RemoveMenuDir" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\Hygieia" Name="shortcuts" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- No <Feature>: WiX v5 puts every component of the package into one default feature. -->
+
+    <!-- Unattended defaults, only on a fresh install: the if-missing flag never touches an existing file. -->
+    <SetProperty Id="SETUP_ARGS" Sequence="execute" Before="HygieiaSetup" Condition="NOT Installed"
+      Value="setup --non-interactive --if-missing --mode &quot;[MODE]&quot; --upstream-url &quot;[UPSTREAM_URL]&quot; --upstream-key &quot;[UPSTREAM_KEY]&quot; --dns [LOCAL_DNS] --dns-upstream &quot;[DNS_UPSTREAM]&quot;" />
+    <CustomAction Id="HygieiaSetup" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="check"
+      ExeCommand="&quot;[INSTALLFOLDER]hygeia-proxy.exe&quot; [SETUP_ARGS]" />
+    <CustomAction Id="ServiceInstall" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="check"
+      ExeCommand="&quot;[INSTALLFOLDER]hygeia-proxy.exe&quot; service install" />
+    <CustomAction Id="ServiceStart" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="ignore"
+      ExeCommand="net start HygeiaProxy" />
+    <!-- Also runs for the old version during an upgrade; state in %ProgramData%\Hygeia is kept. -->
+    <CustomAction Id="ServiceUninstall" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="ignore"
+      ExeCommand="&quot;[INSTALLFOLDER]hygeia-proxy.exe&quot; service uninstall" />
+    <CustomAction Id="TrayStop" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="ignore"
+      ExeCommand="taskkill /F /IM hygeia-tray.exe" />
+
+    <InstallExecuteSequence>
+      <Custom Action="ServiceUninstall" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="TrayStop" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="TrayStop" Before="InstallFiles" Condition="NOT REMOVE" />
+      <Custom Action="HygieiaSetup" After="InstallFiles" Condition="NOT Installed AND NOT REMOVE" />
+      <Custom Action="ServiceInstall" After="HygieiaSetup" Condition="NOT Installed AND NOT REMOVE" />
+      <Custom Action="ServiceStart" After="ServiceInstall" Condition="NOT Installed AND NOT REMOVE" />
+    </InstallExecuteSequence>
+
+    <!-- Interactive install: offer the wizard on the last page (elevated; it restarts the service). -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT"
+              Value="Run the setup wizard now (standalone or connected, optional local DNS)" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <CustomAction Id="LaunchWizard" Directory="INSTALLFOLDER" Return="asyncNoWait"
+      ExeCommand="powershell.exe -NoProfile -WindowStyle Hidden -Command &quot;Start-Process -Verb RunAs -FilePath '[INSTALLFOLDER]hygeia-proxy.exe' -ArgumentList 'setup --force --restart-service --pause'&quot;" />
+
+    <WixVariable Id="WixUILicenseRtf" Value="$(LicenseRtf)" />
+    <ui:WixUI Id="WixUI_Minimal" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchWizard"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+    </UI>
+  </Package>
+</Wix>

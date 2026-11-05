@@ -1,0 +1,14 @@
+[package]
+name = "hygeia-tray"
+description = "Tray icon for the Hygieia node: status and a shortcut to the local dashboard"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# Own workspace on purpose: on Linux tray-icon needs GTK/AppIndicator development packages, so the
+# main workspace (and its CI) does not build it. The Windows CI job builds it explicitly.
+[workspace]
+
+[dependencies]
+tray-icon = { version = "0.21", default-features = false }
+tao = { version = "0.34", default-features = false }

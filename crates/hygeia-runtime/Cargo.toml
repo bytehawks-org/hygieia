@@ -1,0 +1,28 @@
+[package]
+name = "hygeia-runtime"
+description = "Shared runtime helpers for the server and the standalone node: list refresher, DNS follower, key files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hygeia-core.workspace = true
+hygeia-api.workspace = true
+hygeia-dns.workspace = true
+hygeia-lists.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+arc-swap.workspace = true
+ed25519-dalek.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+getrandom = "0.3"
+sha2.workspace = true
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
+
+[dev-dependencies]
+rcgen = "0.14"
+async-trait = "0.1"
+hygeia-store.workspace = true

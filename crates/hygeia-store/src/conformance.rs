@@ -1,0 +1,707 @@
+//! Behavioural contract every [`Store`] implementation must satisfy.
+//! Callers must have created tenant `a.0` with groups `a.1`, `a.2` and tenant
+//! `b.0` with group `b.1` (when the backend enforces referential integrity).
+
+use hygeia_audit::Draft;
+
+use crate::rbac::Role;
+use crate::{
+    CatalogSource, DnsSettings, ListPolicy, QueryLogEntry, Rule, RuleAction, Selection, Store,
+    StoreError, StoredBundle, Subscription,
+};
+
+fn draft(tenant: &str, n: i64) -> Draft {
+    Draft {
+        ts: n,
+        tenant_id: tenant.into(),
+        actor: "test".into(),
+        action: "x.y".into(),
+        target: format!("n{n}"),
+        diff: Some(serde_json::json!({"n": n})),
+    }
+}
+
+pub async fn run(st: &dyn Store, a: (&str, &str, &str), b: (&str, &str)) {
+    let (ta, ga, ga2) = a;
+    let (tb, gb) = b;
+
+    // --- enrollment flow ---
+    let (tok, secret) = st
+        .create_enrollment_token(ta, ga, 60, Some(1), 100)
+        .await
+        .unwrap();
+    let (dev, dsecret) = st.enroll(&secret, "chrome", 110).await.unwrap();
+    assert_eq!((dev.tenant_id.as_str(), dev.group_id.as_str()), (ta, ga));
+    assert_eq!(
+        st.enroll(&secret, "x", 111).await,
+        Err(StoreError::InvalidToken),
+        "max_uses"
+    );
+    let authed = st
+        .authenticate_device(&dsecret, 120)
+        .await
+        .unwrap()
+        .expect("device auth");
+    assert_eq!(authed.id, dev.id);
+    assert!(
+        st.authenticate_device(&secret, 0).await.unwrap().is_none(),
+        "enrollment secret is not a device secret"
+    );
+    assert!(
+        st.authenticate_device("hyg_dev_nope", 0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // wrong tenant cannot revoke
+    assert_eq!(
+        st.revoke_device(tb, &dev.id).await,
+        Err(StoreError::NotFound)
+    );
+    assert_eq!(st.list_devices(tb).await.unwrap().len(), 0);
+    assert_eq!(st.list_devices(ta).await.unwrap().len(), 1);
+    st.revoke_device(ta, &dev.id).await.unwrap();
+    assert!(
+        st.authenticate_device(&dsecret, 121)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // expiry and revocation of enrollment tokens
+    let (_, s1) = st
+        .create_enrollment_token(ta, ga, 10, None, 0)
+        .await
+        .unwrap();
+    assert!(st.enroll(&s1, "", 10).await.is_err(), "expired");
+    let (t2, s2) = st
+        .create_enrollment_token(ta, ga, 10, None, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        st.revoke_enrollment_token(tb, &t2.id).await,
+        Err(StoreError::NotFound)
+    );
+    st.revoke_enrollment_token(ta, &t2.id).await.unwrap();
+    assert!(st.enroll(&s2, "", 1).await.is_err(), "revoked");
+    let _ = tok;
+
+    // --- rules: scoping ---
+    let mk = |t: &str, g: Option<&str>| Rule {
+        id: String::new(),
+        tenant_id: t.into(),
+        group_id: g.map(Into::into),
+        action: RuleAction::Block,
+        pattern: "a.test".into(),
+        comment: String::new(),
+    };
+    let r_all = st.add_rule(mk(ta, None)).await.unwrap();
+    st.add_rule(mk(ta, Some(ga))).await.unwrap();
+    st.add_rule(mk(ta, Some(ga2))).await.unwrap();
+    st.add_rule(mk(tb, None)).await.unwrap();
+    assert_eq!(st.rules_for(ta, ga).await.unwrap().len(), 2);
+    assert_eq!(st.list_rules(ta).await.unwrap().len(), 3);
+    assert_eq!(st.list_rules(tb).await.unwrap().len(), 1);
+    assert_eq!(
+        st.delete_rule(tb, &r_all.id).await.map(|_| ()),
+        Err(StoreError::NotFound)
+    );
+    st.delete_rule(ta, &r_all.id).await.unwrap();
+    assert_eq!(st.list_rules(ta).await.unwrap().len(), 2);
+    let _ = &gb;
+
+    // --- bundle versions are monotonic per (tenant, group) ---
+    assert_eq!(st.next_bundle_version(ta, ga).await.unwrap(), 1);
+    assert_eq!(st.next_bundle_version(ta, ga).await.unwrap(), 2);
+    assert_eq!(st.next_bundle_version(ta, ga2).await.unwrap(), 1);
+
+    // --- compiled bundles: shared, first writer of an input set wins, versions only go up ---
+    assert!(st.load_compiled(ta, ga).await.unwrap().is_none());
+    let sb = |h: &str, v: u64, b: &[u8]| StoredBundle {
+        inputs_hash: h.into(),
+        version: v,
+        bytes: b.to_vec(),
+    };
+    assert_eq!(
+        st.store_compiled(ta, ga, sb("h1", 3, b"one"))
+            .await
+            .unwrap(),
+        sb("h1", 3, b"one")
+    );
+    assert_eq!(
+        st.store_compiled(ta, ga, sb("h1", 4, b"dup"))
+            .await
+            .unwrap(),
+        sb("h1", 3, b"one"),
+        "same inputs: the stored bundle wins"
+    );
+    assert_eq!(
+        st.store_compiled(ta, ga, sb("h2", 2, b"old"))
+            .await
+            .unwrap(),
+        sb("h1", 3, b"one"),
+        "a lower version never replaces a higher one"
+    );
+    assert_eq!(
+        st.store_compiled(ta, ga, sb("h2", 5, b"two"))
+            .await
+            .unwrap(),
+        sb("h2", 5, b"two")
+    );
+    assert_eq!(
+        st.load_compiled(ta, ga).await.unwrap(),
+        Some(sb("h2", 5, b"two"))
+    );
+    assert!(st.load_compiled(ta, ga2).await.unwrap().is_none());
+    assert!(
+        st.load_compiled(tb, gb).await.unwrap().is_none(),
+        "tenant isolation"
+    );
+    st.ping().await.unwrap();
+
+    // --- leases: exclusive until expiry, renewable by the holder, taken over after expiry ---
+    assert!(st.try_lease("conf", "a", 60, 1000).await.unwrap());
+    assert!(
+        !st.try_lease("conf", "b", 60, 1010).await.unwrap(),
+        "held by a"
+    );
+    assert!(
+        st.try_lease("conf", "a", 60, 1050).await.unwrap(),
+        "holder renews"
+    );
+    assert!(
+        !st.try_lease("conf", "b", 60, 1100).await.unwrap(),
+        "renewed until 1110"
+    );
+    assert!(
+        st.try_lease("conf", "b", 60, 1111).await.unwrap(),
+        "expired: taken over"
+    );
+    assert!(!st.try_lease("conf", "a", 60, 1120).await.unwrap());
+
+    // --- shared artefacts ---
+    assert!(st.shared_index("conf:").await.unwrap().is_empty());
+    st.put_shared("conf:x", "h1", b"one").await.unwrap();
+    st.put_shared("conf:y", "h2", b"two").await.unwrap();
+    st.put_shared("other:z", "h3", b"3").await.unwrap();
+    st.put_shared("conf:x", "h1b", b"uno").await.unwrap();
+    assert_eq!(
+        st.shared_index("conf:").await.unwrap(),
+        vec![
+            ("conf:x".to_string(), "h1b".to_string()),
+            ("conf:y".to_string(), "h2".to_string())
+        ]
+    );
+    assert_eq!(
+        st.get_shared("conf:x").await.unwrap(),
+        Some(("h1b".to_string(), b"uno".to_vec()))
+    );
+    assert_eq!(st.get_shared("nope").await.unwrap(), None);
+
+    // --- DNS settings and the query log: off by default, tenant-isolated, retention purge ---
+    let d0 = st.dns_settings(ta).await.unwrap();
+    assert!(
+        !d0.log_enabled && d0.retention_days == 30,
+        "log is off by default"
+    );
+    let new = DnsSettings {
+        log_enabled: true,
+        retention_days: 7,
+        fail_open: Some(true),
+        block_mode: Some("null_ip".into()),
+    };
+    st.set_dns_settings(ta, new.clone()).await.unwrap();
+    assert_eq!(st.dns_settings(ta).await.unwrap(), new);
+    assert_eq!(
+        st.dns_settings(tb).await.unwrap(),
+        DnsSettings::default(),
+        "settings are per tenant"
+    );
+    assert!(
+        st.set_dns_settings(
+            ta,
+            DnsSettings {
+                retention_days: 0,
+                ..new.clone()
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        st.set_dns_settings(
+            ta,
+            DnsSettings {
+                retention_days: 366,
+                ..new.clone()
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        st.set_dns_settings(
+            ta,
+            DnsSettings {
+                block_mode: Some("bogus".into()),
+                ..new.clone()
+            }
+        )
+        .await
+        .is_err()
+    );
+    let q = |ts: i64, name: &str, action: &str| QueryLogEntry {
+        ts,
+        group_id: ga.into(),
+        token_id: Some("tok".into()),
+        transport: "doh".into(),
+        client: "abcd".into(),
+        qname: name.into(),
+        qtype: "A".into(),
+        action: action.into(),
+        reason: "ListBlock".into(),
+    };
+    st.append_query_log(
+        ta,
+        &[
+            q(100, "ads.example.com", "block"),
+            q(200, "example.org", "allow"),
+            q(300, "x.ADS.example.com", "block"),
+        ],
+    )
+    .await
+    .unwrap();
+    st.append_query_log(tb, &[q(250, "other-tenant.test", "allow")])
+        .await
+        .unwrap();
+    let all = st.query_log(ta, 0, 10, None, None).await.unwrap();
+    assert_eq!(
+        all.iter().map(|e| e.ts).collect::<Vec<_>>(),
+        vec![300, 200, 100],
+        "newest first"
+    );
+    assert_eq!(
+        st.query_log(ta, 150, 10, None, None).await.unwrap().len(),
+        2
+    );
+    assert_eq!(st.query_log(ta, 0, 1, None, None).await.unwrap().len(), 1);
+    assert_eq!(
+        st.query_log(ta, 0, 10, Some("ADS."), None)
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "case-insensitive substring"
+    );
+    assert_eq!(
+        st.query_log(ta, 0, 10, None, Some("allow"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        st.query_log(ta, 0, 10, Some("other-tenant"), None)
+            .await
+            .unwrap()
+            .is_empty(),
+        "tenant isolation"
+    );
+    assert_eq!(st.purge_query_log(ta, 250).await.unwrap(), 2);
+    assert_eq!(st.query_log(ta, 0, 10, None, None).await.unwrap().len(), 1);
+    assert_eq!(
+        st.query_log(tb, 0, 10, None, None).await.unwrap().len(),
+        1,
+        "purge is per tenant"
+    );
+    assert_eq!(st.purge_query_log(ta, i64::MAX).await.unwrap(), 1);
+
+    // --- audit: one chain per tenant ---
+    for n in 0..5 {
+        st.append_audit(draft(ta, n)).await.unwrap();
+    }
+    st.append_audit(draft(tb, 0)).await.unwrap();
+    let sa = st.verify_audit(ta).await.unwrap();
+    let sb = st.verify_audit(tb).await.unwrap();
+    assert_eq!((sa.events, sb.events), (5, 1));
+    assert_ne!(sa.head, sb.head);
+    let last3 = st.list_audit(ta, 3).await.unwrap();
+    assert_eq!(last3.len(), 3);
+    assert_eq!(last3[0].seq, 2);
+    assert!(last3.iter().all(|e| e.draft.tenant_id == ta));
+}
+
+/// Tenants, groups, users, role bindings and API tokens. Creates its own tenants.
+pub async fn run_identity(st: &dyn Store) {
+    let a = st.create_tenant("acme", "Acme").await.unwrap();
+    let b = st.create_tenant("beta", "Beta").await.unwrap();
+    assert_eq!(
+        st.create_tenant("acme", "dup").await.map(|_| ()),
+        Err(StoreError::Conflict)
+    );
+    assert!(st.list_tenants().await.unwrap().len() >= 2);
+
+    let g = st.create_group(&a.id, "staff").await.unwrap();
+    assert_eq!(
+        st.create_group(&a.id, "staff").await.map(|_| ()),
+        Err(StoreError::Conflict)
+    );
+    st.create_group(&b.id, "staff").await.unwrap(); // same name in another tenant is fine
+    assert_eq!(st.list_groups(&a.id).await.unwrap(), vec![g]);
+
+    // users: idempotent upsert keyed by (issuer, subject); no implicit roles
+    let u1 = st
+        .upsert_user("https://idp.example.com", "sub-1", Some("a@example.com"))
+        .await
+        .unwrap();
+    let u1b = st
+        .upsert_user("https://idp.example.com", "sub-1", None)
+        .await
+        .unwrap();
+    assert_eq!(u1.id, u1b.id);
+    assert_eq!(
+        u1b.email.as_deref(),
+        Some("a@example.com"),
+        "missing claim must not erase the email"
+    );
+    let u2 = st
+        .upsert_user("https://other-idp.example.com", "sub-1", None)
+        .await
+        .unwrap();
+    assert_ne!(
+        u1.id, u2.id,
+        "same subject at another issuer is another user"
+    );
+    assert!(st.bindings_for_user(&u1.id).await.unwrap().is_empty());
+
+    // bindings: tenant-scoped and platform-wide, idempotent
+    let b1 = st
+        .bind_role(&u1.id, Some(&a.id), Role::Editor)
+        .await
+        .unwrap();
+    assert_eq!(
+        st.bind_role(&u1.id, Some(&a.id), Role::Editor)
+            .await
+            .unwrap()
+            .id,
+        b1.id
+    );
+    st.bind_role(&u1.id, None, Role::Auditor).await.unwrap();
+    assert_eq!(st.bindings_for_user(&u1.id).await.unwrap().len(), 2);
+    assert_eq!(st.list_bindings(Some(&a.id)).await.unwrap().len(), 1);
+    assert_eq!(st.list_bindings(Some(&b.id)).await.unwrap().len(), 0);
+    assert!(
+        st.list_bindings(None)
+            .await
+            .unwrap()
+            .iter()
+            .all(|x| x.tenant_id.is_none())
+    );
+    assert_eq!(
+        st.bind_role("00000000-0000-0000-0000-0000000000ff", None, Role::Viewer)
+            .await
+            .map(|_| ()),
+        Err(StoreError::NotFound)
+    );
+    st.unbind_role(&b1.id).await.unwrap();
+    assert_eq!(st.unbind_role(&b1.id).await, Err(StoreError::NotFound));
+
+    // API tokens
+    let (t, secret) = st
+        .create_api_token(&a.id, "ci", Role::Editor, Some(1000))
+        .await
+        .unwrap();
+    assert!(secret.starts_with("hyg_api_"));
+    let got = st
+        .authenticate_api_token(&secret, 500)
+        .await
+        .unwrap()
+        .expect("valid token");
+    assert_eq!(
+        (got.tenant_id.as_str(), got.role),
+        (a.id.as_str(), Role::Editor)
+    );
+    assert!(
+        st.authenticate_api_token(&secret, 1000)
+            .await
+            .unwrap()
+            .is_none(),
+        "expired"
+    );
+    assert!(
+        st.authenticate_api_token("hyg_api_nope", 0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        st.authenticate_api_token("hyg_dev_whatever", 0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        st.revoke_api_token(&b.id, &t.id).await,
+        Err(StoreError::NotFound),
+        "other tenant cannot revoke"
+    );
+    assert_eq!(st.list_api_tokens(&b.id).await.unwrap().len(), 0);
+    st.revoke_api_token(&a.id, &t.id).await.unwrap();
+    assert!(
+        st.authenticate_api_token(&secret, 500)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(st.list_api_tokens(&a.id).await.unwrap()[0].revoked);
+    assert!(
+        st.create_api_token(&a.id, "x", Role::Owner, None)
+            .await
+            .is_err(),
+        "owner is platform-only"
+    );
+
+    // DNS tokens: attribute a query to (tenant, group); revocable; group must belong to the tenant
+    let ga = st.create_group(&a.id, "dns-g").await.unwrap();
+    let (dt, dsecret) = st
+        .create_dns_token(&a.id, &ga.id, "laptop", Some(1000), true)
+        .await
+        .unwrap();
+    assert!(dsecret.starts_with("hyg_dns_"));
+    let got = st
+        .authenticate_dns_token(&dsecret, 500)
+        .await
+        .unwrap()
+        .expect("valid");
+    assert_eq!(
+        (got.tenant_id.as_str(), got.group_id.as_str()),
+        (a.id.as_str(), ga.id.as_str())
+    );
+    let label = dt.dot_label.clone().expect("created with a DoT label");
+    assert_eq!(
+        st.authenticate_dot_label(&label, 500)
+            .await
+            .unwrap()
+            .map(|t| t.id),
+        Some(dt.id.clone())
+    );
+    assert!(
+        st.authenticate_dot_label(&label, 1000)
+            .await
+            .unwrap()
+            .is_none(),
+        "label of an expired token"
+    );
+    assert!(
+        st.authenticate_dot_label("nope", 0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        st.authenticate_dns_token(&dsecret, 1000)
+            .await
+            .unwrap()
+            .is_none(),
+        "expired"
+    );
+    assert!(
+        st.authenticate_dns_token("hyg_dns_nope", 0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        st.authenticate_dns_token(&secret, 0)
+            .await
+            .unwrap()
+            .is_none(),
+        "an API token is not a DNS token"
+    );
+    assert!(
+        st.create_dns_token(&b.id, &ga.id, "x", None, false)
+            .await
+            .is_err(),
+        "group of another tenant"
+    );
+    assert_eq!(st.list_dns_tokens(&a.id).await.unwrap().len(), 1);
+    assert!(
+        st.list_dns_tokens(&b.id).await.unwrap().is_empty(),
+        "tenant isolation"
+    );
+    assert!(st.revoke_dns_token(&b.id, &dt.id).await.is_err());
+    st.revoke_dns_token(&a.id, &dt.id).await.unwrap();
+    assert!(
+        st.authenticate_dns_token(&dsecret, 500)
+            .await
+            .unwrap()
+            .is_none(),
+        "revoked"
+    );
+    assert!(
+        st.authenticate_dot_label(&label, 500)
+            .await
+            .unwrap()
+            .is_none(),
+        "revoked label"
+    );
+    let (plain, _) = st
+        .create_dns_token(&a.id, &ga.id, "no-dot", None, false)
+        .await
+        .unwrap();
+    assert!(plain.dot_label.is_none());
+
+    // registered client networks: unique across tenants, scoped listing, registrable only
+    let gbb = st.create_group(&b.id, "dns-gb").await.unwrap();
+    let n1 = st
+        .add_dns_network(&a.id, &ga.id, "office", "192.168.50.0/24")
+        .await
+        .unwrap();
+    assert_eq!(n1.cidr, "192.168.50.0/24");
+    assert_eq!(
+        st.add_dns_network(&a.id, &ga.id, "norm", "192.168.60.9/24")
+            .await
+            .unwrap()
+            .cidr,
+        "192.168.60.0/24",
+        "stored canonical"
+    );
+    assert_eq!(
+        st.add_dns_network(&b.id, &gbb.id, "dup", "192.168.50.0/24")
+            .await,
+        Err(StoreError::Conflict),
+        "one tenant per network"
+    );
+    assert!(
+        st.add_dns_network(&a.id, &ga.id, "open", "0.0.0.0/0")
+            .await
+            .is_err(),
+        "too broad"
+    );
+    assert!(
+        st.add_dns_network(&a.id, &ga.id, "bad", "not-a-cidr")
+            .await
+            .is_err()
+    );
+    assert!(
+        st.add_dns_network(&b.id, &ga.id, "foreign", "192.168.70.0/24")
+            .await
+            .is_err(),
+        "group of another tenant"
+    );
+    assert_eq!(st.list_dns_networks(&a.id).await.unwrap().len(), 2);
+    assert!(
+        st.list_dns_networks(&b.id).await.unwrap().is_empty(),
+        "tenant isolation"
+    );
+    assert_eq!(
+        st.all_dns_networks().await.unwrap().len(),
+        2,
+        "the data-plane view spans tenants"
+    );
+    assert!(st.delete_dns_network(&b.id, &n1.id).await.is_err());
+    st.delete_dns_network(&a.id, &n1.id).await.unwrap();
+    assert_eq!(st.all_dns_networks().await.unwrap().len(), 1);
+}
+
+fn src(id: &str) -> CatalogSource {
+    CatalogSource {
+        id: id.into(),
+        name: format!("List {id}"),
+        url: format!("https://example.com/{id}.txt"),
+        license: "CC0-1.0".into(),
+        attribution: "test".into(),
+    }
+}
+
+/// Per-tenant filter-list selection. Creates its own tenants and groups.
+pub async fn run_lists(st: &dyn Store) {
+    st.sync_catalog(&[src("a"), src("b"), src("c")])
+        .await
+        .unwrap();
+    st.sync_catalog(&[src("a"), src("b"), src("c")])
+        .await
+        .unwrap(); // idempotent
+    let t1 = st.create_tenant("lists-one", "One").await.unwrap();
+    let t2 = st.create_tenant("lists-two", "Two").await.unwrap();
+    let g1 = st.create_group(&t1.id, "kids").await.unwrap();
+    let g2 = st.create_group(&t1.id, "staff").await.unwrap();
+    let other_group = st.create_group(&t2.id, "x").await.unwrap();
+
+    // default: every platform-enabled source
+    assert_eq!(st.list_policy(&t1.id).await.unwrap(), ListPolicy::All);
+    assert_eq!(st.selection(&t1.id, &g1.id).await.unwrap(), Selection::All);
+
+    st.set_list_policy(&t1.id, ListPolicy::Selected)
+        .await
+        .unwrap();
+    assert_eq!(
+        st.selection(&t1.id, &g1.id).await.unwrap(),
+        Selection::Only(vec![]),
+        "selected + nothing = nothing"
+    );
+    assert_eq!(
+        st.list_policy(&t2.id).await.unwrap(),
+        ListPolicy::All,
+        "other tenant unaffected"
+    );
+
+    st.subscribe(&t1.id, None, "a").await.unwrap();
+    st.subscribe(&t1.id, None, "a").await.unwrap(); // idempotent
+    st.subscribe(&t1.id, Some(&g1.id), "b").await.unwrap();
+    assert_eq!(
+        st.selection(&t1.id, &g1.id).await.unwrap(),
+        Selection::Only(vec!["a".into(), "b".into()])
+    );
+    assert_eq!(
+        st.selection(&t1.id, &g2.id).await.unwrap(),
+        Selection::Only(vec!["a".into()]),
+        "group list does not leak to other groups"
+    );
+    assert_eq!(st.subscriptions(&t1.id).await.unwrap().len(), 2);
+    assert!(st.subscriptions(&t2.id).await.unwrap().is_empty());
+    assert!(
+        st.subscriptions(&t1.id)
+            .await
+            .unwrap()
+            .contains(&Subscription {
+                group_id: Some(g1.id.clone()),
+                source_id: "b".into()
+            })
+    );
+
+    // integrity: unknown source / foreign group / unknown tenant
+    assert_eq!(
+        st.subscribe(&t1.id, None, "nope").await,
+        Err(StoreError::NotFound)
+    );
+    assert_eq!(
+        st.subscribe(&t1.id, Some(&other_group.id), "a").await,
+        Err(StoreError::NotFound),
+        "group of another tenant"
+    );
+    assert_eq!(
+        st.set_list_policy("00000000-0000-0000-0000-0000000000fe", ListPolicy::All)
+            .await,
+        Err(StoreError::NotFound)
+    );
+
+    st.unsubscribe(&t1.id, Some(&g1.id), "b").await.unwrap();
+    assert_eq!(
+        st.unsubscribe(&t1.id, Some(&g1.id), "b").await,
+        Err(StoreError::NotFound)
+    );
+    assert_eq!(
+        st.selection(&t1.id, &g1.id).await.unwrap(),
+        Selection::Only(vec!["a".into()])
+    );
+    assert_eq!(
+        st.unsubscribe(&t2.id, None, "a").await,
+        Err(StoreError::NotFound),
+        "cannot remove another tenant's subscription"
+    );
+
+    st.set_list_policy(&t1.id, ListPolicy::All).await.unwrap();
+    assert_eq!(st.selection(&t1.id, &g1.id).await.unwrap(), Selection::All);
+}

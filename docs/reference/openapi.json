@@ -1,0 +1,3423 @@
+{
+  "components": {
+    "parameters": {
+      "TenantId": {
+        "description": "Tenant to act on (platform operators and multi-tenant users must set it).",
+        "in": "query",
+        "name": "tenant_id",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "responses": {
+      "Conflict": {
+        "description": "Already exists"
+      },
+      "Forbidden": {
+        "description": "The role does not allow this"
+      },
+      "Invalid": {
+        "description": "Invalid input"
+      },
+      "NotFound": {
+        "description": "Not found"
+      },
+      "TooMany": {
+        "description": "Rate limited"
+      },
+      "Unauthorized": {
+        "description": "Credential missing, expired or revoked"
+      }
+    },
+    "schemas": {
+      "ApiToken": {
+        "properties": {
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "revoked": {
+            "type": "boolean"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "tenant_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "role",
+          "expires_at",
+          "revoked"
+        ],
+        "type": "object"
+      },
+      "AuditEvent": {
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "actor": {
+            "type": "string"
+          },
+          "diff": {
+            "description": "Before/after of the change; never contains secrets."
+          },
+          "hash": {
+            "type": "string"
+          },
+          "prev_hash": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "target": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "ts",
+          "tenant_id",
+          "actor",
+          "action",
+          "target",
+          "prev_hash",
+          "hash"
+        ],
+        "type": "object"
+      },
+      "AuditVerify": {
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "events": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "head": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "type": "object"
+      },
+      "Binding": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "user_id",
+          "tenant_id",
+          "role"
+        ],
+        "type": "object"
+      },
+      "CreatedApiToken": {
+        "properties": {
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "token": {
+            "description": "Shown once.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "token",
+          "role",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "CreatedDnsToken": {
+        "properties": {
+          "doh_path": {
+            "description": "`/dns-query/<token>`",
+            "type": "string"
+          },
+          "dot_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "group_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "token": {
+            "description": "Shown once; it is the DoH credential.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "token",
+          "group_id",
+          "dot_label",
+          "expires_at",
+          "doh_path"
+        ],
+        "type": "object"
+      },
+      "CreatedEnrollmentToken": {
+        "properties": {
+          "expires_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "token": {
+            "description": "Shown once.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "token",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "Deleted": {
+        "properties": {
+          "deleted": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "deleted"
+        ],
+        "type": "object"
+      },
+      "Device": {
+        "properties": {
+          "group_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "info": {
+            "type": "string"
+          },
+          "last_seen": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "revoked": {
+            "type": "boolean"
+          },
+          "tenant_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tenant_id",
+          "group_id",
+          "info",
+          "last_seen",
+          "revoked"
+        ],
+        "type": "object"
+      },
+      "DnsNetwork": {
+        "properties": {
+          "cidr": {
+            "type": "string"
+          },
+          "group_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tenant_id",
+          "group_id",
+          "name",
+          "cidr"
+        ],
+        "type": "object"
+      },
+      "DnsSettings": {
+        "properties": {
+          "block_mode": {
+            "description": "`nxdomain` | `null_ip`; null = server default",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fail_open": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "log_enabled": {
+            "description": "Query log is off by default (data minimisation).",
+            "type": "boolean"
+          },
+          "retention_days": {
+            "maximum": 365,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "log_enabled",
+          "retention_days",
+          "fail_open",
+          "block_mode"
+        ],
+        "type": "object"
+      },
+      "DnsSettingsUpdate": {
+        "properties": {
+          "block_mode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fail_open": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "log_enabled": {
+            "type": "boolean"
+          },
+          "retention_days": {
+            "maximum": 365,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "log_enabled",
+          "retention_days"
+        ],
+        "type": "object"
+      },
+      "DnsStats": {
+        "properties": {
+          "blocked": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "by_transport": {
+            "items": {
+              "properties": {
+                "count": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "key": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "key",
+                "count"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "queries": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "top_blocked": {
+            "items": {
+              "properties": {
+                "count": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "key": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "key",
+                "count"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "top_clients": {
+            "items": {
+              "properties": {
+                "count": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "key": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "key",
+                "count"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "queries",
+          "blocked",
+          "top_blocked",
+          "top_clients",
+          "by_transport"
+        ],
+        "type": "object"
+      },
+      "DnsToken": {
+        "properties": {
+          "dot_label": {
+            "description": "SNI label for DoT/DoQ (an identifier, not a secret).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "group_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "revoked": {
+            "type": "boolean"
+          },
+          "tenant_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tenant_id",
+          "group_id",
+          "name",
+          "expires_at",
+          "revoked"
+        ],
+        "type": "object"
+      },
+      "EnrollRequest": {
+        "properties": {
+          "device_info": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "type": "object"
+      },
+      "EnrollResponse": {
+        "properties": {
+          "device_id": {
+            "type": "string"
+          },
+          "device_secret": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "device_id",
+          "device_secret"
+        ],
+        "type": "object"
+      },
+      "Group": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tenant_id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "Linked": {
+        "properties": {
+          "cidr": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cidr"
+        ],
+        "type": "object"
+      },
+      "ListPolicy": {
+        "enum": [
+          "all",
+          "selected"
+        ],
+        "type": "string"
+      },
+      "ListSelection": {
+        "properties": {
+          "available": {
+            "items": {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "license": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "license"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/ListPolicy"
+          },
+          "subscriptions": {
+            "items": {
+              "properties": {
+                "group_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "group_id",
+                "source_id"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "policy",
+          "subscriptions",
+          "available"
+        ],
+        "type": "object"
+      },
+      "ListStatus": {
+        "properties": {
+          "allow_domains": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "attribution": {
+            "type": "string"
+          },
+          "block_domains": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "dropped_trusted_scriptlets": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "generic_selectors": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "host_rule_sets": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_ok": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "license": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "scriptlet_calls": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "skipped_lines": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "url",
+          "license",
+          "attribution",
+          "last_ok",
+          "last_error",
+          "block_domains",
+          "allow_domains",
+          "generic_selectors",
+          "host_rule_sets",
+          "scriptlet_calls",
+          "skipped_lines",
+          "dropped_trusted_scriptlets",
+          "sha256"
+        ],
+        "type": "object"
+      },
+      "NewApiToken": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ttl_secs": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "role"
+        ],
+        "type": "object"
+      },
+      "NewBinding": {
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "tenant_id": {
+            "description": "Omit for a platform-wide binding.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "role"
+        ],
+        "type": "object"
+      },
+      "NewDnsToken": {
+        "properties": {
+          "dot": {
+            "default": false,
+            "description": "Also create a DoT/DoQ SNI label.",
+            "type": "boolean"
+          },
+          "group_id": {
+            "default": "default",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ttl_secs": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "NewEnrollmentToken": {
+        "properties": {
+          "group_id": {
+            "default": "default",
+            "type": "string"
+          },
+          "max_uses": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ttl_secs": {
+            "default": 3600,
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "NewGroup": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "NewNetwork": {
+        "properties": {
+          "cidr": {
+            "description": "Public IPv4 >= /24, IPv6 >= /48; private blocks whole.",
+            "type": "string"
+          },
+          "group_id": {
+            "default": "default",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "cidr"
+        ],
+        "type": "object"
+      },
+      "NewRule": {
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/RuleAction"
+          },
+          "comment": {
+            "default": "",
+            "type": "string"
+          },
+          "group_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pattern": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "action",
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "NewSubscription": {
+        "properties": {
+          "group_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_id": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "source_id"
+        ],
+        "type": "object"
+      },
+      "NewTenant": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "name"
+        ],
+        "type": "object"
+      },
+      "PolicyUpdate": {
+        "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/ListPolicy"
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "policy"
+        ],
+        "type": "object"
+      },
+      "Principal": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "local_owner"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "break_glass"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "api_token"
+              },
+              "role": {
+                "$ref": "#/components/schemas/Role"
+              },
+              "tenant_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "id",
+              "tenant_id",
+              "role"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "bindings": {
+                "items": {
+                  "$ref": "#/components/schemas/Binding"
+                },
+                "type": "array"
+              },
+              "email": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "issuer": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "user"
+              },
+              "subject": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "id",
+              "issuer",
+              "subject",
+              "email",
+              "bindings"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PublicConfig": {
+        "properties": {
+          "break_glass": {
+            "type": "boolean"
+          },
+          "environment": {
+            "description": "`production` | `staging` | `dev`",
+            "type": "string"
+          },
+          "mode": {
+            "description": "`server` (central) or `standalone` (single-machine node)",
+            "type": "string"
+          },
+          "oidc": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "properties": {
+                  "client_id": {
+                    "type": "string"
+                  },
+                  "issuer": {
+                    "type": "string"
+                  },
+                  "scope": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "issuer",
+                  "client_id",
+                  "scope"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "required": [
+          "mode",
+          "environment",
+          "break_glass",
+          "oidc"
+        ],
+        "type": "object"
+      },
+      "QueryLogEntry": {
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "client": {
+            "description": "Keyed, daily-rotating pseudonym; never the IP address.",
+            "type": "string"
+          },
+          "group_id": {
+            "type": "string"
+          },
+          "qname": {
+            "type": "string"
+          },
+          "qtype": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "token_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "transport": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ts",
+          "group_id",
+          "token_id",
+          "transport",
+          "client",
+          "qname",
+          "qtype",
+          "action",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "Reason": {
+        "oneOf": [
+          {
+            "properties": {
+              "CustomAllow": {
+                "properties": {
+                  "rule": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "rule"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "CustomAllow"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "CustomBlock": {
+                "properties": {
+                  "rule": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "rule"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "CustomBlock"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "ListAllow": {
+                "properties": {
+                  "list": {
+                    "type": "string"
+                  },
+                  "rule": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "list",
+                  "rule"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "ListAllow"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "ListBlock": {
+                "properties": {
+                  "list": {
+                    "type": "string"
+                  },
+                  "rule": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "list",
+                  "rule"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "ListBlock"
+            ],
+            "type": "object"
+          },
+          {
+            "enum": [
+              "Default"
+            ],
+            "type": "string"
+          }
+        ]
+      },
+      "Role": {
+        "description": "`owner` exists only as a platform-wide role.",
+        "enum": [
+          "owner",
+          "admin",
+          "editor",
+          "viewer",
+          "auditor"
+        ],
+        "type": "string"
+      },
+      "Rule": {
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/RuleAction"
+          },
+          "comment": {
+            "type": "string"
+          },
+          "group_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tenant_id",
+          "group_id",
+          "action",
+          "pattern",
+          "comment"
+        ],
+        "type": "object"
+      },
+      "RuleAction": {
+        "enum": [
+          "allow",
+          "block"
+        ],
+        "type": "string"
+      },
+      "Simulation": {
+        "properties": {
+          "current": {
+            "$ref": "#/components/schemas/Verdict"
+          },
+          "with_changes": {
+            "$ref": "#/components/schemas/Verdict"
+          }
+        },
+        "required": [
+          "current",
+          "with_changes"
+        ],
+        "type": "object"
+      },
+      "SimulationRequest": {
+        "properties": {
+          "extra_rules": {
+            "default": [],
+            "description": "Evaluated as if saved; not persisted.",
+            "items": {
+              "properties": {
+                "action": {
+                  "$ref": "#/components/schemas/RuleAction"
+                },
+                "pattern": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "action",
+                "pattern"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "group_id": {
+            "default": "default",
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "host"
+        ],
+        "type": "object"
+      },
+      "Tenant": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "slug",
+          "name"
+        ],
+        "type": "object"
+      },
+      "User": {
+        "properties": {
+          "disabled": {
+            "type": "boolean"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "issuer": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "issuer",
+          "subject",
+          "email",
+          "disabled"
+        ],
+        "type": "object"
+      },
+      "Verdict": {
+        "properties": {
+          "action": {
+            "enum": [
+              "Allow",
+              "Block"
+            ],
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/Reason"
+          }
+        },
+        "required": [
+          "action",
+          "reason"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "adminToken": {
+        "description": "OIDC access token, API token or local owner credential.",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "deviceToken": {
+        "description": "Device credential from /v1/enroll.",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "metricsToken": {
+        "description": "HYGEIA_METRICS_TOKEN.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Control plane, data plane and cloud DNS of Hygieia. Admin calls use a bearer credential (OIDC access token, `hyg_api_…`, local owner `hyg_own_…`); devices use `hyg_dev_…`. `tenant_id` defaults to the caller's single tenant where unambiguous.",
+    "license": {
+      "identifier": "Apache-2.0",
+      "name": "Apache-2.0"
+    },
+    "title": "Hygieia API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/dns-query/{token}": {
+      "get": {
+        "operationId": "dohGet",
+        "parameters": [
+          {
+            "description": "DNS token secret",
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "base64url DNS message",
+            "in": "query",
+            "name": "dns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/dns-message": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "DNS message"
+          },
+          "404": {
+            "description": "Unknown token (or DNS disabled)"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooMany"
+          }
+        },
+        "security": [],
+        "summary": "DNS over HTTPS (RFC 8484 GET); the path is the credential",
+        "tags": [
+          "Cloud DNS"
+        ]
+      },
+      "post": {
+        "operationId": "dohPost",
+        "parameters": [
+          {
+            "description": "DNS token secret",
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/dns-message": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/dns-message": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "DNS message"
+          },
+          "404": {
+            "description": "Unknown token (or DNS disabled)"
+          },
+          "413": {
+            "description": "Message above 4 KiB"
+          },
+          "422": {
+            "$ref": "#/components/responses/Invalid"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooMany"
+          }
+        },
+        "security": [],
+        "summary": "DNS over HTTPS (RFC 8484 POST)",
+        "tags": [
+          "Cloud DNS"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "healthz",
+        "responses": {
+          "200": {
+            "description": "`ok`"
+          }
+        },
+        "security": [],
+        "summary": "Liveness",
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
+    "/metrics": {
+      "get": {
+        "operationId": "metrics",
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Prometheus text format"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "Disabled (no metrics token configured)"
+          }
+        },
+        "security": [
+          {
+            "metricsToken": []
+          }
+        ],
+        "summary": "Prometheus metrics",
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "readyz",
+        "responses": {
+          "200": {
+            "description": "`ready`"
+          },
+          "503": {
+            "description": "Store unavailable"
+          }
+        },
+        "security": [],
+        "summary": "Readiness (store reachable)",
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
+    "/v1/admin/api-tokens": {
+      "get": {
+        "operationId": "listApiTokens",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ApiToken"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "List API tokens",
+        "tags": [
+          "Tokens"
+        ]
+      },
+      "post": {
+        "operationId": "createApiToken",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewApiToken"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedApiToken"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/Invalid"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Create an API token (secret shown once)",
+        "tags": [
+          "Tokens"
+        ]
+      }
+    },
+    "/v1/admin/api-tokens/{id}": {
+      "delete": {
+        "operationId": "revokeApiToken",
+        "parameters": [
+          {
+            "description": "Token id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/TenantId"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Revoke an API token",
+        "tags": [
+          "Tokens"
+        ]
+      }
+    },
+    "/v1/admin/audit": {
+      "get": {
+        "operationId": "audit",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantId"
+          },
+          {
+            "description": "Default 200",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AuditEvent"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Audit events (hash chained)",
+        "tags": [
+          "Audit"
+        ]
+      }
+    },
+    "/v1/admin/audit/verify": {
+      "get": {
+        "operationId": "auditVerify",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditVerify"
+                }
+              }
+            },
+            "description": "Chain intact"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditVerify"
+                }
+              }
+            },
+            "description": "Chain broken"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Verify the hash chain",
+        "tags": [
+          "Audit"
+        ]
+      }
+    },
+    "/v1/admin/bindings": {
+      "get": {
+        "operationId": "listBindings",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Binding"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "List role bindings",
+        "tags": [
+          "Users"
+        ]
+      },
+      "post": {
+        "operationId": "addBinding",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewBinding"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Binding"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/Invalid"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Bind a role to a user",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/v1/admin/bindings/{id}": {
+      "delete": {
+        "operationId": "removeBinding",
+        "parameters": [
+          {
+            "description": "Binding id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/TenantId"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Remove a role binding",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/v1/admin/devices": {
+      "get": {
+        "operationId": "listDevices",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Device"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "List enrolled devices",
+        "tags": [
+          "Devices"
+        ]
+      }
+    },
+    "/v1/admin/devices/{id}": {
+      "delete": {
+        "operationId": "revokeDevice",
+        "parameters": [
+          {
+            "description": "Device id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/TenantId"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Revoke a device",
+        "tags": [
+          "Devices"
+        ]
+      }
+    },
+    "/v1/admin/dns-tokens": {
+      "get": {
+        "operationId": "listDnsTokens",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DnsToken"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "List DNS tokens",
+        "tags": [
+          "Cloud DNS"
+        ]
+      },
+      "post": {
+        "operationId": "createDnsToken",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewDnsToken"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedDnsToken"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/Invalid"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Create a DNS token (secret shown once)",
+        "tags": [
+          "Cloud DNS"
+        ]
+      }
+    },
+    "/v1/admin/dns-tokens/{id}": {
+      "delete": {
+        "operationId": "revokeDnsToken",
+        "parameters": [
+          {
+            "description": "Token id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/TenantId"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Revoke a DNS token",
+        "tags": [
+          "Cloud DNS"
+        ]
+      }
+    },
+    "/v1/admin/dns/networks": {
+      "get": {
+        "operationId": "listDnsNetworks",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DnsNetwork"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "List registered client networks",
+        "tags": [
+          "Cloud DNS"
+        ]
+      },
+      "post": {
+        "operationId": "addDnsNetwork",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewNetwork"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DnsNetwork"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Invalid"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Register a client network (CIDR)",
+        "tags": [
+          "Cloud DNS"
+        ]
+      }
+    },
+    "/v1/admin/dns/networks/{id}": {
+      "delete": {
+        "operationId": "deleteDnsNetwork",
+        "parameters": [
+          {
+            "description": "Network id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/TenantId"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Remove a client network",
+        "tags": [
+          "Cloud DNS"
+        ]
+      }
+    },
+    "/v1/admin/dns/query-log": {
+      "delete": {
+        "operationId": "clearQueryLog",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deleted"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Erase the tenant's query log",
+        "tags": [
+          "Cloud DNS"
+        ]
+      },
+      "get": {
+        "operationId": "getQueryLog",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantId"
+          },
+          {
+            "description": "Unix seconds",
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "1..1000, default 100",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Substring of the query name",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`allow` | `block`",
+            "in": "query",
+            "name": "action",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/QueryLogEntry"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Read the (pseudonymised) query log",
+        "tags": [
+          "Cloud DNS"
+        ]
+      }
+    },
+    "/v1/admin/dns/settings": {
+      "get": {
+        "operationId": "getDnsSettings",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DnsSettings"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Query-log and failure-policy settings",
+        "tags": [
+          "Cloud DNS"
+        ]
+      },
+      "put": {
+        "operationId": "putDnsSettings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DnsSettingsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DnsSettings"
+                }
+              }
+            },
+            "description": "Updated"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/Invalid"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Update the settings",
+        "tags": [
+          "Cloud DNS"
+        ]
+      }
+    },
+    "/v1/admin/dns/stats": {
+      "get": {
+        "operationId": "dnsStats",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantId"
+          },
+          {
+            "description": "Unix seconds",
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Entries considered",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DnsStats"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Aggregates over the query log",
+        "tags": [
+          "Cloud DNS"
+        ]
+      }
+    },
+    "/v1/admin/enrollment-tokens": {
+      "post": {
+        "operationId": "createEnrollmentToken",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewEnrollmentToken"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedEnrollmentToken"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/Invalid"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Create an enrollment token (secret shown once)",
+        "tags": [
+          "Devices"
+        ]
+      }
+    },
+    "/v1/admin/groups": {
+      "get": {
+        "operationId": "listGroups",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Group"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "List groups",
+        "tags": [
+          "Tenants"
+        ]
+      },
+      "post": {
+        "operationId": "createGroup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewGroup"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Group"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Invalid"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Create a group",
+        "tags": [
+          "Tenants"
+        ]
+      }
+    },
+    "/v1/admin/list-policy": {
+      "put": {
+        "operationId": "setListPolicy",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolicyUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Updated"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/Invalid"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Choose all sources or selected only",
+        "tags": [
+          "Filter lists"
+        ]
+      }
+    },
+    "/v1/admin/list-subscriptions": {
+      "delete": {
+        "operationId": "unsubscribe",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantId"
+          },
+          {
+            "description": "Source id",
+            "in": "query",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Group (omit for the whole tenant)",
+            "in": "query",
+            "name": "group_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Remove a subscription",
+        "tags": [
+          "Filter lists"
+        ]
+      },
+      "get": {
+        "operationId": "listSubscriptions",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListSelection"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Policy, subscriptions and available sources",
+        "tags": [
+          "Filter lists"
+        ]
+      },
+      "post": {
+        "operationId": "subscribe",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewSubscription"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Subscribed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/Invalid"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Subscribe a tenant or group to a source",
+        "tags": [
+          "Filter lists"
+        ]
+      }
+    },
+    "/v1/admin/lists": {
+      "get": {
+        "operationId": "listsStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ListStatus"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Status of the downloaded lists",
+        "tags": [
+          "Filter lists"
+        ]
+      }
+    },
+    "/v1/admin/lists/refresh": {
+      "post": {
+        "operationId": "listsRefresh",
+        "responses": {
+          "202": {
+            "description": "Refresh started"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Refresh the lists now",
+        "tags": [
+          "Filter lists"
+        ]
+      }
+    },
+    "/v1/admin/rules": {
+      "get": {
+        "operationId": "listRules",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TenantId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Rule"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "List custom rules",
+        "tags": [
+          "Rules"
+        ]
+      },
+      "post": {
+        "operationId": "addRule",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewRule"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Rule"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/Invalid"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Add a custom rule",
+        "tags": [
+          "Rules"
+        ]
+      }
+    },
+    "/v1/admin/rules/{id}": {
+      "delete": {
+        "operationId": "deleteRule",
+        "parameters": [
+          {
+            "description": "Rule id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/TenantId"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Delete a custom rule",
+        "tags": [
+          "Rules"
+        ]
+      }
+    },
+    "/v1/admin/simulate": {
+      "post": {
+        "operationId": "simulate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Simulation"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/Invalid"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Evaluate a host now and with uncommitted rules",
+        "tags": [
+          "Rules"
+        ]
+      }
+    },
+    "/v1/admin/tenants": {
+      "get": {
+        "operationId": "listTenants",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Tenant"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "List tenants (platform scope)",
+        "tags": [
+          "Tenants"
+        ]
+      },
+      "post": {
+        "operationId": "createTenant",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewTenant"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Tenant"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Invalid"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Create a tenant (platform scope)",
+        "tags": [
+          "Tenants"
+        ]
+      }
+    },
+    "/v1/admin/users": {
+      "get": {
+        "operationId": "listUsers",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/User"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "List users (platform scope)",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/v1/bundle": {
+      "get": {
+        "operationId": "bundle",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "If-None-Match",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/vnd.hygeia.bundle": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Signed bundle",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not modified (If-None-Match)"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "deviceToken": []
+          }
+        ],
+        "summary": "Signed bundle (HYGB) for the device's group",
+        "tags": [
+          "Data plane"
+        ]
+      }
+    },
+    "/v1/config": {
+      "get": {
+        "operationId": "publicConfig",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicConfig"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "security": [],
+        "summary": "Non-secret deployment info (login screen)",
+        "tags": [
+          "Identity"
+        ]
+      }
+    },
+    "/v1/dns/link/{token}": {
+      "put": {
+        "operationId": "linkNetwork",
+        "parameters": [
+          {
+            "description": "DNS token secret",
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Linked"
+                }
+              }
+            },
+            "description": "Registered network"
+          },
+          "404": {
+            "description": "Unknown token (or DNS disabled)"
+          },
+          "422": {
+            "description": "Address not registrable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooMany"
+          }
+        },
+        "security": [],
+        "summary": "Register the caller's address as the token's client network",
+        "tags": [
+          "Cloud DNS"
+        ]
+      }
+    },
+    "/v1/enroll": {
+      "post": {
+        "operationId": "enroll",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrollRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrollResponse"
+                }
+              }
+            },
+            "description": "Device credential"
+          },
+          "401": {
+            "description": "Token invalid, expired, exhausted or revoked (one generic error)"
+          },
+          "422": {
+            "$ref": "#/components/responses/Invalid"
+          }
+        },
+        "security": [],
+        "summary": "Exchange an enrollment token for a device credential",
+        "tags": [
+          "Data plane"
+        ]
+      }
+    },
+    "/v1/me": {
+      "get": {
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Principal"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Who the presented credential is",
+        "tags": [
+          "Identity"
+        ]
+      }
+    },
+    "/v1/openapi.json": {
+      "get": {
+        "operationId": "openapi",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OpenAPI 3.1 document"
+          }
+        },
+        "security": [],
+        "summary": "This document",
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
+    "/v1/pubkey": {
+      "get": {
+        "operationId": "pubkey",
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Hex; trust-on-first-use: pin it through a trusted channel"
+          }
+        },
+        "security": [],
+        "summary": "Bundle signing public key (64 hex)",
+        "tags": [
+          "Data plane"
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Operations"
+    },
+    {
+      "name": "Data plane"
+    },
+    {
+      "name": "Identity"
+    },
+    {
+      "name": "Tenants"
+    },
+    {
+      "name": "Users"
+    },
+    {
+      "name": "Tokens"
+    },
+    {
+      "name": "Devices"
+    },
+    {
+      "name": "Rules"
+    },
+    {
+      "name": "Filter lists"
+    },
+    {
+      "name": "Cloud DNS"
+    },
+    {
+      "name": "Audit"
+    }
+  ]
+}

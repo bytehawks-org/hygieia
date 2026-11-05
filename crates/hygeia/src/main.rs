@@ -1,0 +1,391 @@
+mod config;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use ed25519_dalek::SigningKey;
+use hygeia_api::{
+    AppState, AuthConfig, BreakGlass, DEFAULT_GROUP, DEFAULT_TENANT, OidcConfig, OidcPublic,
+    OidcVerifier, PublicConfig,
+};
+use hygeia_lists::{HttpFetcher, Manager};
+use hygeia_store::{MemoryStore, PgStore, Store};
+
+use hygeia_runtime::rand_hex;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+
+    let cfg: config::Config = match std::env::args().nth(1) {
+        Some(path) => toml::from_str(&std::fs::read_to_string(path)?)?,
+        None => config::Config::default(),
+    };
+
+    let signing_key = match std::env::var("HYGEIA_SIGNING_KEY") {
+        Ok(h) if h.len() == 64 => {
+            let mut seed = [0u8; 32];
+            for (i, c) in h.as_bytes().chunks(2).enumerate() {
+                seed[i] = u8::from_str_radix(std::str::from_utf8(c)?, 16)?;
+            }
+            SigningKey::from_bytes(&seed)
+        }
+        _ => {
+            tracing::warn!(
+                "HYGEIA_SIGNING_KEY (64 hex chars) not set; using an ephemeral signing key"
+            );
+            let mut seed = [0u8; 32];
+            getrandom::fill(&mut seed).expect("OS randomness unavailable");
+            SigningKey::from_bytes(&seed)
+        }
+    };
+
+    let tls_source = if cfg.tls.cert.is_empty() {
+        None
+    } else {
+        let t = hygeia_api::tls::TlsSource::load(
+            std::path::Path::new(&cfg.tls.cert),
+            std::path::Path::new(&cfg.tls.key),
+            &["h2", "http/1.1"],
+        )
+        .map_err(|e| format!("[tls]: {e}"))?;
+        t.spawn_watcher();
+        Some(t)
+    };
+
+    // HYGEIA_DATABASE_URL: runtime role (non-owner, subject to RLS).
+    // HYGEIA_MIGRATE_URL: schema owner; when set, migrations run at startup.
+    let store: Arc<dyn Store> = match std::env::var("HYGEIA_DATABASE_URL") {
+        Ok(url) => {
+            if let Ok(owner) = std::env::var("HYGEIA_MIGRATE_URL") {
+                PgStore::migrate(&owner).await?;
+                tracing::info!("migrations applied");
+            }
+            Arc::new(PgStore::connect(&url).await?)
+        }
+        Err(_) => {
+            tracing::warn!("HYGEIA_DATABASE_URL not set: using NON-PERSISTENT in-memory store");
+            Arc::new(MemoryStore::new())
+        }
+    };
+    store.bootstrap_default().await?;
+    let (auth, public) = build_auth(&cfg, &store).await?;
+    let mut state = AppState::new(store, signing_key, auth);
+    state.public = public;
+    if let Ok(t) = std::env::var("HYGEIA_METRICS_TOKEN") {
+        if t.len() < 16 {
+            return Err("HYGEIA_METRICS_TOKEN must be at least 16 characters".into());
+        }
+        state.metrics_token = Some(t);
+        tracing::info!("metrics enabled at /metrics (bearer token required)");
+    }
+    state.trusted_proxies = cfg
+        .api
+        .trusted_proxies
+        .iter()
+        .map(|c| c.parse().map_err(|e| format!("api.trusted_proxies: {e}")))
+        .collect::<Result<_, String>>()?;
+    if cfg.cloud_dns.enabled {
+        let c = &cfg.cloud_dns;
+        let specs: Vec<String> = if !c.upstreams.is_empty() {
+            c.upstreams.clone()
+        } else if !c.upstream.is_empty() {
+            vec![c.upstream.clone()]
+        } else {
+            vec!["udp://9.9.9.9:53".into()]
+        };
+        let pool = hygeia_dns::UpstreamPool::new(&specs, Duration::from_secs(3))
+            .map_err(|e| format!("cloud_dns.upstreams: {e}"))?;
+        let mut d = hygeia_api::doh::DnsServiceConfig::with_pool(Arc::new(pool));
+        d.block_mode = match c.block_mode.as_str() {
+            "null_ip" => hygeia_dns::BlockMode::NullIp,
+            _ => hygeia_dns::BlockMode::NxDomain,
+        };
+        d.rate_per_sec = c.rate_per_sec;
+        d.burst = c.burst;
+        d.fail_open = c.fail_open;
+        d.ip_rate_per_sec = c.ip_rate_per_sec;
+        d.ip_burst = c.ip_burst;
+        match std::env::var("HYGEIA_LOG_KEY") {
+            Ok(h) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => {
+                for (i, c) in h.as_bytes().chunks(2).enumerate() {
+                    d.log_key[i] = u8::from_str_radix(std::str::from_utf8(c)?, 16)?;
+                }
+            }
+            _ => tracing::warn!(
+                "HYGEIA_LOG_KEY (64 hex chars) not set: query-log pseudonyms use a per-process key (they change at every restart)"
+            ),
+        }
+        let svc = Arc::new(hygeia_api::doh::DnsService::new(d));
+        svc.start_log_writer(state.store.clone());
+        state.dns = Some(svc);
+        tracing::info!(
+            "cloud DNS (DoH) enabled at /dns-query/<token>; terminate TLS in front and redact the path in logs"
+        );
+    }
+    let state = Arc::new(state);
+    if cfg.cloud_dns.enabled {
+        hygeia_runtime::spawn_query_log_purger(state.clone());
+        let c = &cfg.cloud_dns;
+        if let Some(svc) = &state.dns {
+            svc.start_network_refresher(state.store.clone());
+        }
+        if !c.udp_listen.is_empty() {
+            hygeia_runtime::frontends::spawn_udp(state.clone(), &c.udp_listen)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        if !c.tcp_listen.is_empty() {
+            hygeia_runtime::frontends::spawn_tcp(state.clone(), &c.tcp_listen)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        if !c.dot_listen.is_empty() {
+            if c.dot_domain.is_empty() {
+                return Err("cloud_dns.dot_listen needs cloud_dns.dot_domain".into());
+            }
+            if cfg.tls.cert.is_empty() {
+                return Err("cloud_dns.dot_listen needs [tls] cert and key".into());
+            }
+            let dot_tls = hygeia_api::tls::TlsSource::load(
+                std::path::Path::new(&cfg.tls.cert),
+                std::path::Path::new(&cfg.tls.key),
+                &["dot"],
+            )
+            .map_err(|e| format!("[tls]: {e}"))?;
+            dot_tls.spawn_watcher();
+            hygeia_runtime::frontends::spawn_dot(
+                state.clone(),
+                &c.dot_listen,
+                dot_tls,
+                &c.dot_domain,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+        if !c.doq_listen.is_empty() {
+            if c.dot_domain.is_empty() {
+                return Err("cloud_dns.doq_listen needs cloud_dns.dot_domain".into());
+            }
+            if cfg.tls.cert.is_empty() {
+                return Err("cloud_dns.doq_listen needs [tls] cert and key".into());
+            }
+            let doq_tls = hygeia_api::tls::TlsSource::load_quic(
+                std::path::Path::new(&cfg.tls.cert),
+                std::path::Path::new(&cfg.tls.key),
+                &["doq"],
+            )
+            .map_err(|e| format!("[tls]: {e}"))?;
+            doq_tls.spawn_watcher();
+            hygeia_runtime::frontends::spawn_doq(
+                state.clone(),
+                &c.doq_listen,
+                doq_tls,
+                &c.dot_domain,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    // Data plane: DNS follows the control plane by pulling the signed bundle.
+    if cfg.dns.enabled {
+        let rules =
+            hygeia_runtime::spawn_dns_follower(state.clone(), DEFAULT_TENANT, DEFAULT_GROUP);
+        let upstream = cfg.dns.upstream.first().ok_or("dns.upstream is empty")?;
+        hygeia_runtime::spawn_dns_server(&cfg.dns.listen, upstream, &cfg.dns.block_mode, rules)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    if cfg.lists.enabled {
+        let sources = cfg.lists.resolve()?;
+        let insecure = cfg.lists.allow_insecure_http;
+        if insecure {
+            tracing::warn!(
+                "lists.allow_insecure_http is on: list downloads are not protected in transit"
+            );
+        }
+        let manager = Manager::new(
+            sources,
+            Arc::new(HttpFetcher::new(64 << 20, insecure)?),
+            insecure,
+        );
+        let interval = Duration::from_secs(cfg.lists.refresh_hours.max(1) * 3600);
+        hygeia_runtime::coordinated::spawn(state.clone(), manager, interval);
+    }
+
+    let listener = tokio::net::TcpListener::bind(&cfg.api.listen).await?;
+    tracing::info!(listen = %cfg.api.listen, "api listening");
+    let web_dir = if !cfg.api.web_dir.is_empty() {
+        Some(cfg.api.web_dir.clone())
+    } else if let Ok(d) = std::env::var("HYGEIA_WEB_DIR") {
+        Some(d)
+    } else {
+        std::path::Path::new("/usr/share/hygeia/web")
+            .is_dir()
+            .then(|| "/usr/share/hygeia/web".to_string())
+    };
+    let app = match web_dir {
+        Some(dir) => {
+            let mut connect: Vec<String> = cfg.auth.oidc.ui_connect_src.clone();
+            if let Some(origin) = hygeia_runtime::origin_of(&cfg.auth.oidc.issuer) {
+                connect.push(origin);
+            }
+            let ui = hygeia_api::ui::Ui::load(&dir, &connect)?;
+            tracing::info!(%dir, "admin UI enabled");
+            hygeia_api::router_with_ui(state, ui)
+        }
+        None => hygeia_api::router(state),
+    };
+    let app = if cfg.api.access_log {
+        app.layer(axum::middleware::from_fn(
+            hygeia_api::accesslog::log_requests,
+        ))
+    } else {
+        app
+    };
+    if cfg.api.tls {
+        let tls = tls_source.ok_or("api.tls = true needs [tls] cert and key")?;
+        let app = app.layer(axum::middleware::map_response(
+            |mut r: axum::response::Response| async move {
+                r.headers_mut().insert(
+                    "strict-transport-security",
+                    axum::http::HeaderValue::from_static("max-age=31536000"),
+                );
+                r
+            },
+        ));
+        tracing::info!("api serving HTTPS");
+        hygeia_api::tls::serve_tls(listener, app, tls, shutdown_signal()).await?;
+        return Ok(());
+    }
+    axum_serve(listener, app).await
+}
+
+/// SIGTERM (orchestrators, systemd) and Ctrl-C both drain in-flight requests.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+async fn axum_serve(
+    l: tokio::net::TcpListener,
+    app: hygeia_api::Router,
+) -> Result<(), Box<dyn std::error::Error>> {
+    hygeia_api::serve(l, app, shutdown_signal()).await?;
+    Ok(())
+}
+
+/// Assemble authentication from config + environment. Secrets never come from the file.
+async fn build_auth(
+    cfg: &config::Config,
+    store: &Arc<dyn Store>,
+) -> Result<(AuthConfig, PublicConfig), Box<dyn std::error::Error>> {
+    use config::Environment;
+    let mut env = cfg.auth.environment;
+    if let Ok(v) = std::env::var("HYGEIA_ENVIRONMENT") {
+        env = match v.as_str() {
+            "production" => Environment::Production,
+            "staging" => Environment::Staging,
+            "dev" => Environment::Dev,
+            other => return Err(format!("HYGEIA_ENVIRONMENT: unknown value {other:?}").into()),
+        };
+    }
+    let bg_wanted = cfg.auth.break_glass.enabled
+        || (env == Environment::Dev && std::env::var("HYGEIA_BREAK_GLASS_TOKEN").is_ok());
+
+    let break_glass = if bg_wanted || env == Environment::Dev {
+        if env == Environment::Production {
+            return Err("break-glass is not allowed when environment = \"production\"".into());
+        }
+        let secret =
+            match std::env::var("HYGEIA_BREAK_GLASS_TOKEN") {
+                Ok(t) => t,
+                Err(_) if env == Environment::Dev => {
+                    let t = format!("hyg_bg_{}", rand_hex(24));
+                    tracing::warn!("DEV: generated a throwaway break-glass token: {t}");
+                    t
+                }
+                Err(_) => return Err(
+                    "break-glass enabled in staging: set HYGEIA_BREAK_GLASS_TOKEN (>= 32 chars)"
+                        .into(),
+                ),
+            };
+        let ttl = (cfg.auth.break_glass.ttl_hours > 0)
+            .then(|| Duration::from_secs(cfg.auth.break_glass.ttl_hours * 3600));
+        let bg = BreakGlass::new(&secret, ttl)?;
+        tracing::warn!(
+            ?env,
+            ttl_hours = cfg.auth.break_glass.ttl_hours,
+            "BREAK-GLASS access is ENABLED; every use is audited"
+        );
+        if !cfg.api.listen.starts_with("127.") && !cfg.api.listen.starts_with("localhost") {
+            tracing::warn!(listen = %cfg.api.listen, "break-glass on a non-loopback listener: restrict it at the network layer");
+        }
+        Some(bg)
+    } else {
+        None
+    };
+
+    let o = &cfg.auth.oidc;
+    let oidc = if o.issuer.is_empty() {
+        None
+    } else {
+        if o.audience.is_empty() {
+            return Err("auth.oidc.audience must not be empty".into());
+        }
+        let v = OidcVerifier::new(OidcConfig {
+            issuer: o.issuer.clone(),
+            audience: o.audience.clone(),
+            leeway_secs: o.leeway_secs,
+            allow_insecure_http: o.allow_insecure_http,
+        })?;
+        for sub in &o.bootstrap_owners {
+            let u = store.upsert_user(&o.issuer, sub, None).await?;
+            store
+                .bind_role(&u.id, None, hygeia_store::rbac::Role::Owner)
+                .await?;
+            tracing::warn!(subject = %sub, "bootstrap owner ensured");
+        }
+        Some(v)
+    };
+
+    if break_glass.is_none() && oidc.is_none() {
+        tracing::warn!(
+            "no admin authentication configured (set [auth.oidc], or environment = \"dev\"/\"staging\" with break-glass): the admin API is unusable"
+        );
+    }
+    let public = PublicConfig {
+        mode: "server".into(),
+        environment: format!("{env:?}").to_lowercase(),
+        break_glass: break_glass.is_some(),
+        oidc: (oidc.is_some() && !o.client_id.is_empty()).then(|| OidcPublic {
+            issuer: o.issuer.clone(),
+            client_id: o.client_id.clone(),
+            scope: "openid email profile".into(),
+        }),
+    };
+    Ok((
+        AuthConfig {
+            local_owner: None,
+            break_glass,
+            oidc,
+        },
+        public,
+    ))
+}

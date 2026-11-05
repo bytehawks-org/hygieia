@@ -1,0 +1,11 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand: #0f766e;
+  --color-brand-dark: #115e59;
+}
+
+:root { color-scheme: light dark; }
+body { @apply bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100; }
+input, select, textarea { @apply rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-900; }
+input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible { @apply outline-2 outline-offset-2 outline-brand; }

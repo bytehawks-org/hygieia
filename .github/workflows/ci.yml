@@ -1,0 +1,137 @@
+name: ci
+# Runs on release tags only (called by release.yml) or by hand from the Actions tab.
+# Day-to-day gate is local: scripts/check-all.sh --all
+on:
+  workflow_call:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      HYGEIA_TEST_PG_ADMIN: postgres://hygeia_owner:owner@localhost:5432
+      HYGEIA_TEST_PG_APP: postgres://hygeia_app:app@localhost:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Create database roles
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -c "create role hygeia_owner login createdb password 'owner'"
+          psql -h localhost -U postgres -c "create role hygeia_app login password 'app' nosuperuser nobypassrls"
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo check -p hygeia-core --target wasm32-unknown-unknown
+
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.130
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: ./extension/build.sh
+      - run: node --test extension/test/*.test.mjs
+      - run: node extension/package.mjs firefox
+      - run: npx --yes web-ext@10 lint -s extension/dist/firefox
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - name: OpenAPI document and generated TypeScript types are current
+        run: scripts/gen-api.sh --check
+      - run: npm run typecheck
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - run: cargo build -p hygeia
+      - name: Install Playwright (end-to-end)
+        working-directory: web
+        run: |
+          npm install --no-save playwright
+          npx playwright install --with-deps chromium
+      - run: cargo build -p hygeia-proxy
+      - name: UI end-to-end (server)
+        working-directory: web
+        run: node test/e2e.mjs
+      - name: UI end-to-end (standalone node)
+        working-directory: web
+        run: node test/e2e-node.mjs
+
+  extension-e2e:
+    # Real Chromium + the real extension against the real server and node. Passes locally; advisory
+    # until it has had its first green run on GitHub's runners.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.130
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: ./extension/build.sh
+      - run: cargo build -p hygeia -p hygeia-proxy
+      - name: Install Playwright Chromium
+        working-directory: extension
+        run: |
+          npm install --no-save playwright
+          npx playwright install --with-deps chromium
+          echo "CHROMIUM=$(node -e "console.log(require('playwright').chromium.executablePath())")" >> "$GITHUB_ENV"
+      - name: Extension end-to-end (server)
+        run: node extension/test/e2e.mjs
+      - name: Extension end-to-end (standalone node)
+        run: node extension/test/e2e.mjs
+        env:
+          E2E_TARGET: node
+
+  windows:
+    # Unproven: first run will show whether the node builds and its tests pass on Windows.
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/setup-nasm@v1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p hygeia-proxy
+      - run: cargo test -p hygeia-proxy -p hygeia-store --lib
+      - run: cargo test -p hygeia-proxy --test node
+      - run: cargo test -p hygeia-proxy --test connected

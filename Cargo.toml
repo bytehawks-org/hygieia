@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["crates/hygeia-tray"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/bytehawks-org/hygieia"
+rust-version = "1.85"
+
+[workspace.dependencies]
+hygeia-core = { path = "crates/hygeia-core" }
+hygeia-audit = { path = "crates/hygeia-audit" }
+hygeia-store = { path = "crates/hygeia-store" }
+hygeia-lists = { path = "crates/hygeia-lists" }
+hygeia-runtime = { path = "crates/hygeia-runtime" }
+hygeia-api = { path = "crates/hygeia-api" }
+hygeia-dns = { path = "crates/hygeia-dns" }
+hygeia-proxy = { path = "crates/hygeia-proxy" }
+hygeia-blocker = { path = "crates/hygeia-blocker" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+sha2 = "0.11"
+ed25519-dalek = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+arc-swap = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,9 @@
+[package]
+name = "hygeia-winsvc"
+description = "Windows Service Control Manager glue (install, uninstall, run) for the Hygieia node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
