@@ -89,7 +89,20 @@ Installing does not start the service and does not touch the system resolver. Co
 
 Using DNS on port 53 with systemd-resolved: either serve on `127.0.0.1:5353` and point resolved at it, or set `DNSStubListener=no` in a drop-in. The node never changes resolver settings itself.
 
-### Windows (service, **untested**)
+### Windows (MSI + setup wizard, **untested**)
+
+`hygeia-proxy-windows-x64.msi` (release assets and the `windows` CI artifact) installs to `Program Files\Hygieia`, registers the service and the tray, and starts the node with the safe defaults (standalone, DNS off). Interactive installs end with **Run the setup wizard**; the same wizard is in the Start menu (*Hygieia setup wizard*). It is elevated, asks for the mode (standalone, or connected with the central URL and the **pinned** signing key) and the optional local DNS, validates the answer with the node's own parser, writes `%ProgramData%\Hygeia\hygeia-proxy.toml` (the previous file is kept as `.bak`) and restarts the service. Upgrades never touch the configuration. Uninstalling keeps `%ProgramData%\Hygeia`.
+
+Unattended (the properties are validated by `setup`; an invalid value fails the install):
+
+```bash
+msiexec /i hygeia-proxy-windows-x64.msi /qn MODE=connected UPSTREAM_URL=https://hygeia.example.com UPSTREAM_KEY=<64 hex>
+msiexec /i hygeia-proxy-windows-x64.msi /qn LOCAL_DNS=true DNS_UPSTREAM=9.9.9.9:53
+```
+
+The wizard is a plain subcommand and works on any OS: `hygeia-proxy setup` (see [CLI](../reference/cli.md)). The MSI is built by `packaging/windows/build-msi.ps1` (WiX v5) and has never been installed on a real Windows machine.
+
+#### Windows (zip + scripts, **untested**)
 
 From the release zip, in an elevated PowerShell: `./install.ps1` (copies to `Program Files\Hygeia`, runs `hygeia-proxy service install`, starts service `HygeiaProxy` as LocalService, registers the tray icon for logon). Data in `%ProgramData%\Hygeia`, restricted to SYSTEM, Administrators and LocalService. Read the credential from an elevated prompt: `hygeia-proxy --data-dir "%ProgramData%\Hygeia" token`. Remove with `uninstall.ps1` (state is kept). The service code is only cross-type-checked; report what you see when you try it.
 

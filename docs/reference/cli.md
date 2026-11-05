@@ -22,6 +22,7 @@ hygeia-proxy [--data-dir DIR] [--config FILE] [COMMAND]
 | `open` | open the UI in the browser, already signed in (standalone only). The credential is never in process arguments |
 | `info` | data dir, config, listen address, DNS mode, public key |
 | `check-config` | validate the configuration and exit non-zero on error |
+| `setup [--mode standalone\|connected] [--upstream-url U] [--upstream-key K] [--dns true\|false] [--dns-upstream a,b] [--non-interactive] [--force] [--if-missing] [--restart-service] [--pause]` | first-run wizard: asks what flags do not answer (when on a terminal), validates with the node's parser, writes the config atomically. Refuses to overwrite without `--force` (keeps `.bak`); `--if-missing` leaves an existing file alone; `--restart-service` restarts the Windows service |
 | `service install` / `uninstall` | Windows service management (elevated). On Linux use systemd |
 | `service run` | entry point used by the Windows Service Control Manager (not for manual use) |
 

@@ -60,4 +60,15 @@ stop; start
 ceq "signing key is stable (browsers pin it)" "$("$BIN" --data-dir "$D" pubkey)" "$PUB"
 ceq "enrolled device still authenticates" "$(code -H "authorization: Bearer $SEC" $B/v1/bundle)" 200
 ceq "audit chain still verifies" "$(curl -s "${A[@]}" $B/v1/admin/audit/verify | jget ok)" True
+say; say "Setup wizard (hygeia-proxy setup)"
+W="$D/wiz.toml"
+check "non-interactive setup writes a valid config" "$BIN" --config "$W" setup --non-interactive --mode standalone --dns true --dns-upstream 1.1.1.1:53
+check "written config passes check-config" "$BIN" --config "$W" check-config
+ceq "second run without --force refuses" "$("$BIN" --config "$W" setup --non-interactive --mode standalone >/dev/null 2>&1; echo $?)" 1
+ceq "--if-missing keeps the existing file" "$("$BIN" --config "$W" setup --non-interactive --mode standalone --if-missing >/dev/null 2>&1; grep -c 'mode = "local"' "$W")" 1
+ceq "connected with http:// URL is rejected" "$("$BIN" --config "$D/bad.toml" setup --non-interactive --mode connected --upstream-url http://c.example.com --upstream-key "$PUB" >/dev/null 2>&1; echo $?)" 1
+ceq "...and nothing is written" "$([ -e "$D/bad.toml" ] && echo yes || echo no)" no
+CPUB=$("$BIN" --data-dir "$D" pubkey)
+check "connected setup with https + pinned key is accepted" "$BIN" --config "$D/conn.toml" setup --non-interactive --mode connected --upstream-url https://hygeia.example.com --upstream-key "$CPUB"
+ceq "without a terminal or --mode it fails instead of waiting" "$(printf '1\nn\n' | "$BIN" --config "$D/pipe.toml" setup >/dev/null 2>&1; echo $?)" 1
 report

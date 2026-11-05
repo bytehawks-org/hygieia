@@ -95,7 +95,7 @@ Step by step: [Getting started](docs/guides/getting-started.md).
 | Linux `.deb` + systemd | `packaging/linux/build-deb.sh` or the release asset; `systemctl enable --now hygeia-proxy` | built and installed in a container; unit not run on a live systemd host |
 | Linux tarballs | release assets (`hygeia-proxy`, `hygeia-server`) | built by CI |
 | Linux RPM | `packaging/linux/hygeia-proxy.spec` | written, **never built** |
-| Windows service + tray | release zip → `install.ps1` (elevated) | cross-type-checked, **never run on Windows** |
+| Windows service + tray + setup wizard | release `.msi` (or zip → `install.ps1`, elevated) | cross-type-checked, **never run on Windows** |
 | Container (server) | `podman build -f deploy/Containerfile -t hygeia .` | Containerfile provided (distroless, non-root); **not built in CI** |
 | Browser extension | release zips or `extension/build.sh` + load unpacked | Chromium e2e tested; Firefox lint + fake-API tests only |
 
@@ -116,7 +116,7 @@ Releases are cut by tagging `vX.Y.Z` (workflow `release`, draft release with `SH
 | Central redundancy: shared compiled bundles, coordinated list refresh, `/readyz`, graceful drain | done; tested with in-process replicas |
 | Cloud DNS: DoH, DoT, DoQ, plain UDP/TCP for registered networks; upstream failover over UDP/DoT/DoH; per-token, per-source and failed-auth limits; per-tenant policy; opt-in pseudonymised query log with retention; Prometheus metrics; native HTTPS with certificate hot-reload | implemented, tested in-process and by smoke scenarios; **not load-tested, no DNSSEC validation, no HTTP/3** |
 | Packaging: `.deb`, systemd, Windows service/tray | see *Install* |
-| OpenAPI + generated client, MSI, wizard, node-side cloud forwarding | planned: [Roadmap](docs/ROADMAP.md) |
+| OpenAPI + generated client, node-side cloud forwarding | planned: [Roadmap](docs/ROADMAP.md) |
 
 ## Documentation
 

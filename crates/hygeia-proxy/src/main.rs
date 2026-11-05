@@ -34,6 +34,8 @@ enum Cmd {
     Info,
     /// Validate the configuration and exit.
     CheckConfig,
+    /// First-run wizard: writes the configuration file (interactive, or driven by flags).
+    Setup(hygeia_proxy::setup::SetupArgs),
     /// Windows service management (install, uninstall).
     #[command(subcommand)]
     Service(hygeia_proxy::service::ServiceCmd),
@@ -73,6 +75,19 @@ async fn main() -> ExitCode {
 async fn real_main(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (p, cfg_path) = paths(&cli)?;
     match cli.command.unwrap_or(Cmd::Run) {
+        Cmd::Setup(args) => {
+            use std::io::IsTerminal;
+            // Same default location as `service install`: the machine-wide one on Windows.
+            #[cfg(windows)]
+            let target = if cli.config.is_none() && cli.data_dir.is_none() {
+                hygeia_proxy::service::program_data_dir().join("hygeia-proxy.toml")
+            } else {
+                cfg_path.clone()
+            };
+            #[cfg(not(windows))]
+            let target = cfg_path.clone();
+            hygeia_proxy::setup::run(&args, &target, std::io::stdin().is_terminal())?;
+        }
         Cmd::Service(sub) => {
             // `install` without --data-dir uses the machine-wide location, not the user profile.
             #[cfg(windows)]

@@ -143,8 +143,15 @@ jobs:
           Copy-Item web/out dist/hygeia/web -Recurse
           Copy-Item packaging/windows/*.ps1 dist/hygeia/
           Compress-Archive dist/hygeia dist/hygeia-proxy-windows-x64.zip
+      - name: Build the MSI (WiX)
+        shell: pwsh
+        run: packaging/windows/build-msi.ps1
       - uses: actions/upload-artifact@v4
-        with: { name: hygeia-proxy-windows, path: dist/hygeia-proxy-windows-x64.zip }
+        with:
+          name: hygeia-proxy-windows
+          path: |
+            dist/hygeia-proxy-windows-x64.zip
+            dist/hygeia-proxy-windows-x64.msi
 
   package-linux:
     runs-on: ubuntu-latest
