@@ -9,6 +9,12 @@ updates:
   - package-ecosystem: npm
     directory: /web
     schedule: { interval: weekly }
+    ignore:
+      # openapi-typescript peers on TypeScript 5; @types/node must follow the Node 22 used in CI.
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
+      - dependency-name: "@types/node"
+        update-types: [version-update:semver-major]
     groups:
       web-minor-patch:
         update-types: [minor, patch]
