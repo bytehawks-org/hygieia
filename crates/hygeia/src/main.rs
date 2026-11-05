@@ -144,8 +144,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let r = manager.refresh().await;
                 let status = serde_json::to_value(&r.status).unwrap_or_default();
                 if r.changed || first {
-                    st.set_lists(r.sources, status);
-                    tracing::info!(sources = r.status.len(), "lists updated");
+                    match st.set_lists(r.sources, status).await {
+                        Ok(()) => tracing::info!(sources = r.status.len(), "lists updated"),
+                        Err(e) => tracing::error!(error = %e, "could not install refreshed lists"),
+                    }
                 } else {
                     st.set_list_status(status);
                 }

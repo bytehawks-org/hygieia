@@ -1,6 +1,6 @@
 import { clearSession, loadSession } from './session';
 import type {
-  ApiToken, AuditEvent, Binding, Device, Group, ListStatus, Principal, PublicConfig, Role, Rule, Simulation,
+  ApiToken, AuditEvent, Binding, Device, Group, ListPolicy, ListSelection, ListStatus, Principal, PublicConfig, Role, Rule, Simulation,
   Tenant, User,
 } from './types';
 
@@ -66,6 +66,13 @@ export const api = {
 
   lists: () => request<ListStatus[]>('/v1/admin/lists'),
   refreshLists: () => request<void>('/v1/admin/lists/refresh', { method: 'POST' }),
+
+  listSelection: (t: string) => request<ListSelection>(`/v1/admin/list-subscriptions${q(t)}`),
+  setListPolicy: (t: string, policy: ListPolicy) => request<void>('/v1/admin/list-policy', { method: 'PUT', ...json({ tenant_id: t, policy }) }),
+  subscribe: (t: string, source_id: string, group_id: string | null) =>
+    request<void>('/v1/admin/list-subscriptions', { method: 'POST', ...json({ tenant_id: t, source_id, group_id }) }),
+  unsubscribe: (t: string, source_id: string, group_id: string | null) =>
+    request<void>(`/v1/admin/list-subscriptions${q(t, { source_id, ...(group_id ? { group_id } : {}) })}`, { method: 'DELETE' }),
 
   audit: (t: string, limit = 200) => request<AuditEvent[]>(`/v1/admin/audit${q(t, { limit: String(limit) })}`),
   verifyAudit: (t: string) => request<{ ok: boolean; head: string; events: number }>(`/v1/admin/audit/verify${q(t)}`),

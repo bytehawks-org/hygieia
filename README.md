@@ -27,9 +27,9 @@ flowchart TD
 | Crate | State |
 |---|---|
 | `hygeia-core` | Done: trie matcher, hosts/domains/ABP(domain-level) parsers, policy, cosmetic model, signed bundle. Tested; builds for wasm32 |
-| `hygeia-lists` | Catalogue (HaGeZi, StevenBlack, URLhaus, EasyList/EasyPrivacy, uBlock filters), https-only downloader with ETag/304 and size cap, parsing at refresh time, shrink/empty guards, per-source status. Missing: scheduler persistence, per-tenant source selection, AdGuard/other scriptlet dialects |
+| `hygeia-lists` | Catalogue (HaGeZi, StevenBlack, URLhaus, EasyList/EasyPrivacy, uBlock filters), https-only downloader with ETag/304 and size cap, parsing at refresh time, shrink/empty guards, per-source status. Missing: scheduler persistence, AdGuard/other scriptlet dialects |
 | `hygeia-audit` | Done: hash chain, verify, CEF. Missing: syslog/OTLP sinks, external head anchoring |
-| `hygeia-store` | PostgreSQL (sqlx) is the production store: RLS tenant isolation, per-tenant audit chain, composite FKs. tenants/groups, users, role bindings, API tokens. In-memory store for tests. Missing: list catalogue/subscription queries, sqlx offline cache |
+| `hygeia-store` | PostgreSQL (sqlx) is the production store: RLS tenant isolation, per-tenant audit chain, composite FKs. tenants/groups, users, role bindings, API tokens. In-memory store for tests. Missing: sqlx offline cache |
 | `hygeia-api` | Enroll, bundle (ETag/304), rules CRUD, simulate (dry-run), audit + verify. Static admin token. `/v1/admin/lists` (+`/refresh`). Missing: OIDC + RBAC wiring, OpenAPI (utoipa), gRPC, groups/time windows, regex rules |
 | `hygeia-dns` | UDP server, block via NXDOMAIN/null IP, plain UDP upstream. Missing: TCP, DoT/DoH/DoQ, DoT upstream, tenant resolution, query log, metrics |
 | `hygeia-proxy` | Skeleton (CONNECT host decision) |
@@ -69,6 +69,8 @@ attribution = "me"
 network = true              # feeds DNS / proxy
 cosmetic = false            # feeds the blocker (element hiding + scriptlets)
 ```
+
+**Per-tenant selection.** The platform config decides which sources are *available* (downloaded). Each tenant then has a policy: `all` (default: every available list) or `selected` (only its subscriptions, tenant-wide or per policy group; a group subscription never reaches other groups). Managed in the UI (*Filter lists*) or via `GET /v1/admin/list-subscriptions`, `PUT /v1/admin/list-policy`, `POST`/`DELETE /v1/admin/list-subscriptions` (needs the rules-write permission; every change is audited and takes effect on the next bundle pull). The catalogue with licenses is mirrored into PostgreSQL (`list_sources`); sources removed from the configuration are disabled, not deleted, so existing subscriptions survive. The built-in DNS server still serves only the default tenant (tenant resolution per DoH/DoT/CIDR is not implemented yet).
 
 Two kinds of rules, kept separate per source (`network` / `cosmetic`): domain rules (DNS, proxy) and DOM/JS rules (element hiding, `##+js(...)` scriptlet calls for the blocker). Lists are untrusted input:
 

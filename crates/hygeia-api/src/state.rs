@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ed25519_dalek::SigningKey;
 use hygeia_audit::Draft;
 use hygeia_core::SignedBundle;
-use hygeia_store::{Result as StoreResult, Store};
+use hygeia_store::{CatalogSource, Result as StoreResult, Selection, Store};
 use serde_json::Value;
 
 use hygeia_core::ParsedSource;
@@ -48,11 +48,34 @@ impl AppState {
         }
     }
 
-    /// Install freshly parsed sources and their status report; invalidates bundles.
-    pub fn set_lists(&self, lists: Vec<Arc<ParsedSource>>, status: Value) {
+    /// Install freshly parsed sources and their status report; mirrors the catalogue into the
+    /// store (so tenants can subscribe) and invalidates cached bundles.
+    pub async fn set_lists(&self, lists: Vec<Arc<ParsedSource>>, status: Value) -> StoreResult<()> {
+        let catalog: Vec<CatalogSource> = lists
+            .iter()
+            .map(|l| CatalogSource {
+                id: l.meta.id.clone(),
+                name: l.meta.name.clone(),
+                url: l.meta.url.clone(),
+                license: l.meta.license.clone(),
+                attribution: l.meta.attribution.clone(),
+            })
+            .collect();
+        self.store.sync_catalog(&catalog).await?;
         *self.lists.write().unwrap() = lists;
         *self.list_status.write().unwrap() = status;
         self.invalidate();
+        Ok(())
+    }
+
+    /// Sources currently loaded (platform-enabled), in precedence order.
+    pub fn available_sources(&self) -> Vec<hygeia_core::SourceMeta> {
+        self.lists
+            .read()
+            .unwrap()
+            .iter()
+            .map(|l| l.meta.clone())
+            .collect()
     }
 
     /// Update only the status report (content unchanged: bundles stay valid).
@@ -76,7 +99,18 @@ impl AppState {
         }
         let version = self.store.next_bundle_version(tenant, group).await?;
         let rules = self.store.rules_for(tenant, group).await?;
-        let lists = self.lists.read().unwrap().clone();
+        let selection = self.store.selection(tenant, group).await?;
+        let lists: Vec<Arc<ParsedSource>> = self
+            .lists
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|l| match &selection {
+                Selection::All => true,
+                Selection::Only(ids) => ids.contains(&l.meta.id),
+            })
+            .cloned()
+            .collect();
         let b = Arc::new(compile(
             tenant,
             group,

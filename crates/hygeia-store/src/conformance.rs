@@ -5,7 +5,9 @@
 use hygeia_audit::Draft;
 
 use crate::rbac::Role;
-use crate::{Rule, RuleAction, Store, StoreError};
+use crate::{
+    CatalogSource, ListPolicy, Rule, RuleAction, Selection, Store, StoreError, Subscription,
+};
 
 fn draft(tenant: &str, n: i64) -> Draft {
     Draft {
@@ -257,4 +259,105 @@ pub async fn run_identity(st: &dyn Store) {
             .is_err(),
         "owner is platform-only"
     );
+}
+
+fn src(id: &str) -> CatalogSource {
+    CatalogSource {
+        id: id.into(),
+        name: format!("List {id}"),
+        url: format!("https://example.com/{id}.txt"),
+        license: "CC0-1.0".into(),
+        attribution: "test".into(),
+    }
+}
+
+/// Per-tenant filter-list selection. Creates its own tenants and groups.
+pub async fn run_lists(st: &dyn Store) {
+    st.sync_catalog(&[src("a"), src("b"), src("c")])
+        .await
+        .unwrap();
+    st.sync_catalog(&[src("a"), src("b"), src("c")])
+        .await
+        .unwrap(); // idempotent
+    let t1 = st.create_tenant("lists-one", "One").await.unwrap();
+    let t2 = st.create_tenant("lists-two", "Two").await.unwrap();
+    let g1 = st.create_group(&t1.id, "kids").await.unwrap();
+    let g2 = st.create_group(&t1.id, "staff").await.unwrap();
+    let other_group = st.create_group(&t2.id, "x").await.unwrap();
+
+    // default: every platform-enabled source
+    assert_eq!(st.list_policy(&t1.id).await.unwrap(), ListPolicy::All);
+    assert_eq!(st.selection(&t1.id, &g1.id).await.unwrap(), Selection::All);
+
+    st.set_list_policy(&t1.id, ListPolicy::Selected)
+        .await
+        .unwrap();
+    assert_eq!(
+        st.selection(&t1.id, &g1.id).await.unwrap(),
+        Selection::Only(vec![]),
+        "selected + nothing = nothing"
+    );
+    assert_eq!(
+        st.list_policy(&t2.id).await.unwrap(),
+        ListPolicy::All,
+        "other tenant unaffected"
+    );
+
+    st.subscribe(&t1.id, None, "a").await.unwrap();
+    st.subscribe(&t1.id, None, "a").await.unwrap(); // idempotent
+    st.subscribe(&t1.id, Some(&g1.id), "b").await.unwrap();
+    assert_eq!(
+        st.selection(&t1.id, &g1.id).await.unwrap(),
+        Selection::Only(vec!["a".into(), "b".into()])
+    );
+    assert_eq!(
+        st.selection(&t1.id, &g2.id).await.unwrap(),
+        Selection::Only(vec!["a".into()]),
+        "group list does not leak to other groups"
+    );
+    assert_eq!(st.subscriptions(&t1.id).await.unwrap().len(), 2);
+    assert!(st.subscriptions(&t2.id).await.unwrap().is_empty());
+    assert!(
+        st.subscriptions(&t1.id)
+            .await
+            .unwrap()
+            .contains(&Subscription {
+                group_id: Some(g1.id.clone()),
+                source_id: "b".into()
+            })
+    );
+
+    // integrity: unknown source / foreign group / unknown tenant
+    assert_eq!(
+        st.subscribe(&t1.id, None, "nope").await,
+        Err(StoreError::NotFound)
+    );
+    assert_eq!(
+        st.subscribe(&t1.id, Some(&other_group.id), "a").await,
+        Err(StoreError::NotFound),
+        "group of another tenant"
+    );
+    assert_eq!(
+        st.set_list_policy("00000000-0000-0000-0000-0000000000fe", ListPolicy::All)
+            .await,
+        Err(StoreError::NotFound)
+    );
+
+    st.unsubscribe(&t1.id, Some(&g1.id), "b").await.unwrap();
+    assert_eq!(
+        st.unsubscribe(&t1.id, Some(&g1.id), "b").await,
+        Err(StoreError::NotFound)
+    );
+    assert_eq!(
+        st.selection(&t1.id, &g1.id).await.unwrap(),
+        Selection::Only(vec!["a".into()])
+    );
+    assert_eq!(
+        st.unsubscribe(&t2.id, None, "a").await,
+        Err(StoreError::NotFound),
+        "cannot remove another tenant's subscription"
+    );
+
+    st.set_list_policy(&t1.id, ListPolicy::All).await.unwrap();
+    assert_eq!(st.selection(&t1.id, &g1.id).await.unwrap(), Selection::All);
 }

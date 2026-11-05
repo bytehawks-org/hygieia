@@ -69,6 +69,13 @@ async fn pg_identity_conformance() {
 }
 
 #[tokio::test]
+async fn pg_lists_conformance() {
+    let Some(env) = setup().await else { return };
+    let st = PgStore::connect(&env.app_db).await.unwrap();
+    conformance::run_lists(&st).await;
+}
+
+#[tokio::test]
 async fn pg_rls_and_audit_immutability() {
     let Some(env) = setup().await else { return };
     let st = PgStore::connect(&env.app_db).await.unwrap();

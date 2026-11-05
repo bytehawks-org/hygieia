@@ -126,7 +126,7 @@ try {
   await page.getByText('STAGING environment').first().waitFor();
   await page.fill('#token', 'wrong-token-wrong-token-wrong-token-xx');
   await page.getByRole('button', { name: 'Sign in with token' }).click();
-  await page.getByRole('alert').waitFor();
+  await page.locator('p[role="alert"]').waitFor();
   await page.fill('#token', BG);
   await page.getByRole('button', { name: 'Sign in with token' }).click();
   await page.waitForURL(`${API}/`);
@@ -152,7 +152,7 @@ try {
   assert.match(await sim.innerText(), /With the rule:\s*Allow/);
   await page.getByLabel('Domain', { exact: true }).fill('not a domain');
   await page.getByRole('button', { name: 'Add', exact: true }).click();
-  await page.getByRole('alert').waitFor();
+  await page.locator('p[role="alert"]').waitFor();
 
   // ---- enrollment token shown once, then a device enrolls and can be revoked
   await page.getByRole('link', { name: 'Devices' }).click();
@@ -174,6 +174,17 @@ try {
   await page.getByRole('cell', { name: /Test DNS list/ }).waitFor();
   await page.getByText('CC0-1.0').waitFor();
   await page.locator('span', { hasText: /^ok$/ }).first().waitFor();
+  // per-tenant selection: all -> selected (nothing) -> subscribe -> unsubscribe -> all
+  await page.getByLabel(/All platform-enabled lists/).waitFor();
+  await page.getByLabel('Only the lists selected below').check();
+  await page.getByText('No lists selected').waitFor();
+  await page.getByLabel('List source').selectOption({ label: 'Test DNS list (CC0-1.0)' });
+  await page.getByRole('button', { name: 'Subscribe' }).click();
+  await page.getByRole('button', { name: 'Unsubscribe Test DNS list' }).waitFor();
+  await page.getByRole('button', { name: 'Unsubscribe Test DNS list' }).click();
+  await page.getByText('No lists selected').waitFor();
+  await page.getByLabel(/All platform-enabled lists/).check();
+  await page.getByRole('button', { name: 'Subscribe' }).waitFor({ state: 'detached' });
 
   // ---- audit: chain intact, break-glass usage visible, secrets absent
   await page.getByRole('link', { name: 'Audit' }).click();
@@ -206,7 +217,7 @@ try {
   await page.getByTestId('who').filter({ hasText: 'API token' }).waitFor();
   assert.equal(await page.getByRole('link', { name: 'Tenants' }).count(), 0, 'platform pages are hidden for tenant roles');
   await page.getByRole('link', { name: 'Audit' }).click();
-  await page.getByRole('alert').filter({ hasText: 'role does not allow' }).first().waitFor();
+  await page.locator('p[role="alert"]').filter({ hasText: 'role does not allow' }).first().waitFor();
 
   // ---- OIDC (PKCE) login as alice, platform owner via bootstrap_owners
   await page.getByRole('button', { name: 'Sign out' }).click();

@@ -119,6 +119,28 @@ pub trait Store: Send + Sync {
 
     async fn next_bundle_version(&self, tenant_id: &str, group_id: &str) -> Result<u64>;
 
+    // ---- filter-list selection ----
+    /// Upsert the platform catalogue (idempotent). Sources are never deleted: subscriptions keep referring to them.
+    async fn sync_catalog(&self, sources: &[CatalogSource]) -> Result<()>;
+    async fn list_policy(&self, tenant_id: &str) -> Result<ListPolicy>;
+    async fn set_list_policy(&self, tenant_id: &str, policy: ListPolicy) -> Result<()>;
+    async fn subscriptions(&self, tenant_id: &str) -> Result<Vec<Subscription>>;
+    /// Idempotent. `NotFound` for an unknown tenant, group or source.
+    async fn subscribe(
+        &self,
+        tenant_id: &str,
+        group_id: Option<&str>,
+        source_id: &str,
+    ) -> Result<()>;
+    async fn unsubscribe(
+        &self,
+        tenant_id: &str,
+        group_id: Option<&str>,
+        source_id: &str,
+    ) -> Result<()>;
+    /// Resolved selection for one bundle: policy plus tenant-wide and group subscriptions.
+    async fn selection(&self, tenant_id: &str, group_id: &str) -> Result<Selection>;
+
     // ---- tenants and groups ----
     async fn create_tenant(&self, slug: &str, name: &str) -> Result<Tenant>;
     async fn list_tenants(&self) -> Result<Vec<Tenant>>;
@@ -181,6 +203,39 @@ pub struct Device {
     pub info: String,
     pub last_seen: i64,
     pub revoked: bool,
+}
+
+/// Provenance of a filter list, mirrored into the database so subscriptions can reference it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogSource {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub license: String,
+    pub attribution: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ListPolicy {
+    /// Every platform-enabled source.
+    All,
+    /// Only explicit subscriptions.
+    Selected,
+}
+
+/// `group_id == None`: applies to the whole tenant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Subscription {
+    pub group_id: Option<String>,
+    pub source_id: String,
+}
+
+/// Which sources a (tenant, group) bundle includes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Selection {
+    All,
+    Only(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,6 +310,9 @@ struct State {
     users: Vec<User>,
     bindings: Vec<Binding>,
     api_tokens: Vec<(ApiToken, [u8; 32])>,
+    catalog: Vec<CatalogSource>,
+    policies: HashMap<String, ListPolicy>,
+    subs: Vec<(String, Subscription)>,
 }
 
 #[derive(Default)]
@@ -433,6 +491,116 @@ impl Store for MemoryStore {
             .or_insert(0);
         *v += 1;
         Ok(*v)
+    }
+
+    async fn sync_catalog(&self, sources: &[CatalogSource]) -> Result<()> {
+        let mut s = self.s.lock().unwrap();
+        for src in sources {
+            match s.catalog.iter_mut().find(|c| c.id == src.id) {
+                Some(c) => *c = src.clone(),
+                None => s.catalog.push(src.clone()),
+            }
+        }
+        Ok(())
+    }
+
+    async fn list_policy(&self, tenant_id: &str) -> Result<ListPolicy> {
+        Ok(self
+            .s
+            .lock()
+            .unwrap()
+            .policies
+            .get(tenant_id)
+            .copied()
+            .unwrap_or(ListPolicy::All))
+    }
+
+    async fn set_list_policy(&self, tenant_id: &str, policy: ListPolicy) -> Result<()> {
+        let mut s = self.s.lock().unwrap();
+        if !s.tenants.iter().any(|t| t.id == tenant_id) {
+            return Err(StoreError::NotFound);
+        }
+        s.policies.insert(tenant_id.into(), policy);
+        Ok(())
+    }
+
+    async fn subscriptions(&self, tenant_id: &str) -> Result<Vec<Subscription>> {
+        Ok(self
+            .s
+            .lock()
+            .unwrap()
+            .subs
+            .iter()
+            .filter(|(t, _)| t == tenant_id)
+            .map(|(_, x)| x.clone())
+            .collect())
+    }
+
+    async fn subscribe(
+        &self,
+        tenant_id: &str,
+        group_id: Option<&str>,
+        source_id: &str,
+    ) -> Result<()> {
+        let mut s = self.s.lock().unwrap();
+        let known_group = group_id.is_none_or(|g| {
+            s.groups
+                .iter()
+                .any(|x| x.id == g && x.tenant_id == tenant_id)
+        });
+        if !s.tenants.iter().any(|t| t.id == tenant_id)
+            || !known_group
+            || !s.catalog.iter().any(|c| c.id == source_id)
+        {
+            return Err(StoreError::NotFound);
+        }
+        let sub = Subscription {
+            group_id: group_id.map(Into::into),
+            source_id: source_id.into(),
+        };
+        if !s.subs.iter().any(|(t, x)| t == tenant_id && *x == sub) {
+            s.subs.push((tenant_id.into(), sub));
+        }
+        Ok(())
+    }
+
+    async fn unsubscribe(
+        &self,
+        tenant_id: &str,
+        group_id: Option<&str>,
+        source_id: &str,
+    ) -> Result<()> {
+        let mut s = self.s.lock().unwrap();
+        let before = s.subs.len();
+        s.subs.retain(|(t, x)| {
+            !(t == tenant_id && x.group_id.as_deref() == group_id && x.source_id == source_id)
+        });
+        if s.subs.len() == before {
+            Err(StoreError::NotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn selection(&self, tenant_id: &str, group_id: &str) -> Result<Selection> {
+        let s = self.s.lock().unwrap();
+        if s.policies
+            .get(tenant_id)
+            .copied()
+            .unwrap_or(ListPolicy::All)
+            == ListPolicy::All
+        {
+            return Ok(Selection::All);
+        }
+        let mut ids: Vec<String> = s
+            .subs
+            .iter()
+            .filter(|(t, x)| t == tenant_id && x.group_id.as_deref().is_none_or(|g| g == group_id))
+            .map(|(_, x)| x.source_id.clone())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        Ok(Selection::Only(ids))
     }
 
     async fn create_tenant(&self, slug: &str, name: &str) -> Result<Tenant> {
@@ -678,6 +846,7 @@ mod tests {
         let st = MemoryStore::new();
         crate::conformance::run(&st, ("t1", "g1", "g1b"), ("t2", "g2")).await;
         crate::conformance::run_identity(&MemoryStore::new()).await;
+        crate::conformance::run_lists(&MemoryStore::new()).await;
 
         // the default tenant/group exist after bootstrap (idempotent)
         let st = MemoryStore::new();

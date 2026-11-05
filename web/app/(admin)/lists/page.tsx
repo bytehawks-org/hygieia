@@ -1,7 +1,58 @@
 'use client';
-import { useState } from 'react';
-import { Badge, Button, Card, ErrorBox, Table, Td, fmtTime, useAsync } from '@/components/ui';
+import { useState, type FormEvent } from 'react';
+import { useApp } from '@/components/Shell';
+import { Badge, Button, Card, ErrorBox, Field, Table, Td, fmtTime, short, useAsync } from '@/components/ui';
 import { api } from '@/lib/api';
+
+function Selection() {
+  const { tenant, tenantLabel } = useApp();
+  const sel = useAsync(() => api.listSelection(tenant), [tenant]);
+  const groups = useAsync(() => api.groups(tenant), [tenant]);
+  const [err, setErr] = useState<unknown>(null);
+  const [add, setAdd] = useState({ source: '', group: '' });
+  const [pending, setPending] = useState<'all' | 'selected' | null>(null); // optimistic radio state
+  const run = async (fn: () => Promise<unknown>) => { setErr(null); try { await fn(); } catch (x) { setErr(x); } sel.reload(); };
+  const d = sel.data;
+  const groupName = (id: string | null) => (id ? (groups.data?.find((g) => g.id === id)?.name ?? short(id)) : 'whole tenant');
+  const nameOf = (id: string) => d?.available.find((a) => a.id === id)?.name ?? id;
+
+  return (
+    <Card title={`Lists for ${tenantLabel(tenant)}`}>
+      <ErrorBox error={err ?? sel.error} />
+      {d && (
+        <div className="space-y-3">
+          <fieldset className="space-y-1 text-sm">
+            <legend className="sr-only">Which lists this tenant receives</legend>
+            {(['all', 'selected'] as const).map((p) => (
+              <label key={p} className="flex items-center gap-2">
+                <input type="radio" name="policy" checked={(pending ?? d.policy) === p}
+                  onChange={() => { setPending(p); run(() => api.setListPolicy(tenant, p)).finally(() => setPending(null)); }} />
+                {p === 'all' ? `All platform-enabled lists (${d.available.length})` : 'Only the lists selected below'}
+              </label>
+            ))}
+          </fieldset>
+          {(pending ?? d.policy) === 'selected' && (
+            <>
+              <form className="flex flex-wrap items-end gap-3" onSubmit={(e: FormEvent) => { e.preventDefault(); run(() => api.subscribe(tenant, add.source, add.group || null)); }}>
+                <Field label="List"><select required value={add.source} onChange={(e) => setAdd({ ...add, source: e.target.value })} aria-label="List source"><option value="">Choose…</option>{d.available.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.license})</option>)}</select></Field>
+                <Field label="Applies to"><select value={add.group} onChange={(e) => setAdd({ ...add, group: e.target.value })} aria-label="Applies to"><option value="">Whole tenant</option>{groups.data?.map((g) => <option key={g.id} value={g.id}>Group: {g.name}</option>)}</select></Field>
+                <Button type="submit">Subscribe</Button>
+              </form>
+              <Table head={['List', 'Applies to', '']} empty={d.subscriptions.length === 0 ? 'No lists selected: this tenant receives only its own custom rules.' : undefined}>
+                {d.subscriptions.map((s) => (
+                  <tr key={`${s.group_id}-${s.source_id}`}>
+                    <Td>{nameOf(s.source_id)}</Td><Td>{groupName(s.group_id)}</Td>
+                    <Td><Button variant="danger" aria-label={`Unsubscribe ${nameOf(s.source_id)}`} onClick={() => run(() => api.unsubscribe(tenant, s.source_id, s.group_id))}>Remove</Button></Td>
+                  </tr>
+                ))}
+              </Table>
+            </>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
 
 export default function Lists() {
   const lists = useAsync(() => api.lists(), []);
@@ -13,8 +64,9 @@ export default function Lists() {
     <>
       <h1 className="text-2xl font-semibold">Filter lists</h1>
       <p className="text-sm text-zinc-500">Third-party lists are downloaded at runtime. Check each license before redistributing derived data.</p>
+      <Selection />
       <ErrorBox error={err ?? lists.error} />
-      <Card title="Sources" actions={
+      <Card title="Sources (platform)" actions={
         <div className="flex gap-2">
           <Button variant="ghost" onClick={() => lists.reload()}>Reload</Button>
           <Button onClick={async () => { setErr(null); try { await api.refreshLists(); setAsked(true); setTimeout(lists.reload, 4000); } catch (x) { setErr(x); } }}>Refresh now (platform)</Button>

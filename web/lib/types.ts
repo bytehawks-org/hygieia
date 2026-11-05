@@ -40,3 +40,11 @@ export type Reason =
   | 'Default';
 export interface Verdict { action: 'Allow' | 'Block'; reason: Reason }
 export interface Simulation { current: Verdict; with_changes: Verdict }
+
+export type ListPolicy = 'all' | 'selected';
+export interface Subscription { group_id: string | null; source_id: string }
+export interface ListSelection {
+  policy: ListPolicy;
+  subscriptions: Subscription[];
+  available: { id: string; name: string; license: string }[];
+}

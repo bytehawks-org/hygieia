@@ -9,9 +9,10 @@ use sqlx::{Postgres, Row, Transaction};
 
 use crate::rbac::Role;
 use crate::{
-    ApiToken, AuditStatus, Binding, DEFAULT_GROUP_ID, DEFAULT_TENANT_ID, Device, EnrollmentToken,
-    Group, PREFIX_API, PREFIX_DEVICE, PREFIX_ENROLL, Result, Rule, RuleAction, Store, StoreError,
-    Tenant, User, hash_secret, new_id, new_secret,
+    ApiToken, AuditStatus, Binding, CatalogSource, DEFAULT_GROUP_ID, DEFAULT_TENANT_ID, Device,
+    EnrollmentToken, Group, ListPolicy, PREFIX_API, PREFIX_DEVICE, PREFIX_ENROLL, Result, Rule,
+    RuleAction, Selection, Store, StoreError, Subscription, Tenant, User, hash_secret, new_id,
+    new_secret,
 };
 
 #[derive(Clone)]
@@ -353,6 +354,143 @@ impl Store for PgStore {
         .map_err(map_err)?;
         tx.commit().await.map_err(map_err)?;
         Ok(v as u64)
+    }
+
+    async fn sync_catalog(&self, sources: &[CatalogSource]) -> Result<()> {
+        let mut tx = self.pool.begin().await.map_err(map_err)?;
+        for c in sources {
+            sqlx::query(
+                "insert into list_sources (id, name, url, license, attribution, enabled) values ($1, $2, $3, $4, $5, true)
+                 on conflict (id) do update set name = excluded.name, url = excluded.url,
+                   license = excluded.license, attribution = excluded.attribution, enabled = true",
+            )
+            .bind(&c.id)
+            .bind(&c.name)
+            .bind(&c.url)
+            .bind(&c.license)
+            .bind(&c.attribution)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_err)?;
+        }
+        // sources no longer in the configuration stay (subscriptions reference them) but are disabled
+        let ids: Vec<&str> = sources.iter().map(|c| c.id.as_str()).collect();
+        sqlx::query("update list_sources set enabled = false where not (id = any($1))")
+            .bind(&ids)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_err)?;
+        tx.commit().await.map_err(map_err)
+    }
+
+    async fn list_policy(&self, tenant_id: &str) -> Result<ListPolicy> {
+        let p: Option<String> =
+            sqlx::query_scalar("select list_policy from tenants where id = $1::uuid")
+                .bind(tenant_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(map_err)?;
+        match p.as_deref() {
+            Some("selected") => Ok(ListPolicy::Selected),
+            Some(_) => Ok(ListPolicy::All),
+            None => Err(StoreError::NotFound),
+        }
+    }
+
+    async fn set_list_policy(&self, tenant_id: &str, policy: ListPolicy) -> Result<()> {
+        let n = sqlx::query("update tenants set list_policy = $2 where id = $1::uuid")
+            .bind(tenant_id)
+            .bind(match policy {
+                ListPolicy::All => "all",
+                ListPolicy::Selected => "selected",
+            })
+            .execute(&self.pool)
+            .await
+            .map_err(map_err)?
+            .rows_affected();
+        if n == 0 {
+            Err(StoreError::NotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn subscriptions(&self, tenant_id: &str) -> Result<Vec<Subscription>> {
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        let rows = sqlx::query(
+            "select group_id::text, source_id from list_subscriptions order by source_id, group_id",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_err)?;
+        tx.commit().await.map_err(map_err)?;
+        Ok(rows
+            .iter()
+            .map(|r| Subscription {
+                group_id: r.get(0),
+                source_id: r.get(1),
+            })
+            .collect())
+    }
+
+    async fn subscribe(
+        &self,
+        tenant_id: &str,
+        group_id: Option<&str>,
+        source_id: &str,
+    ) -> Result<()> {
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        sqlx::query(
+            "insert into list_subscriptions (tenant_id, group_id, source_id) values ($1::uuid, $2::uuid, $3)
+             on conflict (tenant_id, group_id, source_id) do nothing",
+        )
+        .bind(tenant_id)
+        .bind(group_id)
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_err)?;
+        tx.commit().await.map_err(map_err)
+    }
+
+    async fn unsubscribe(
+        &self,
+        tenant_id: &str,
+        group_id: Option<&str>,
+        source_id: &str,
+    ) -> Result<()> {
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        let n = sqlx::query(
+            "delete from list_subscriptions where group_id is not distinct from $1::uuid and source_id = $2",
+        )
+        .bind(group_id)
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_err)?
+        .rows_affected();
+        tx.commit().await.map_err(map_err)?;
+        if n == 0 {
+            Err(StoreError::NotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn selection(&self, tenant_id: &str, group_id: &str) -> Result<Selection> {
+        if self.list_policy(tenant_id).await? == ListPolicy::All {
+            return Ok(Selection::All);
+        }
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        let ids: Vec<String> = sqlx::query_scalar(
+            "select distinct source_id from list_subscriptions where group_id is null or group_id = $1::uuid order by 1",
+        )
+        .bind(group_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_err)?;
+        tx.commit().await.map_err(map_err)?;
+        Ok(Selection::Only(ids))
     }
 
     async fn create_tenant(&self, slug: &str, name: &str) -> Result<Tenant> {

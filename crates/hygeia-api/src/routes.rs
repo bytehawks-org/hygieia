@@ -73,6 +73,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/admin/rules/{id}", delete(delete_rule))
         .route("/v1/admin/lists", get(lists_status))
         .route("/v1/admin/lists/refresh", post(lists_refresh))
+        .route(
+            "/v1/admin/list-subscriptions",
+            get(list_subscriptions).post(subscribe).delete(unsubscribe),
+        )
+        .route("/v1/admin/list-policy", axum::routing::put(set_list_policy))
         .route("/v1/admin/simulate", post(simulate))
         .route("/v1/admin/audit", get(audit))
         .route("/v1/admin/audit/verify", get(audit_verify))
@@ -663,6 +668,137 @@ async fn lists_refresh(State(st): S, h: HeaderMap) -> Response {
     StatusCode::ACCEPTED.into_response()
 }
 
+// ---------------------------------------------------------------- per-tenant list selection
+
+async fn list_subscriptions(State(st): S, h: HeaderMap, Query(q): Query<TenantQ>) -> Response {
+    let (_, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::RulesRead,
+            q.tenant_id,
+            "list-subscription.list"
+        )
+        .await
+    );
+    let policy = ok_or!(st.store.list_policy(&tenant).await);
+    let subs = ok_or!(st.store.subscriptions(&tenant).await);
+    let available: Vec<_> = st
+        .available_sources()
+        .into_iter()
+        .map(|m| json!({"id": m.id, "name": m.name, "license": m.license}))
+        .collect();
+    Json(json!({"policy": policy, "subscriptions": subs, "available": available})).into_response()
+}
+
+#[derive(Deserialize)]
+struct PolicyReq {
+    tenant_id: Option<String>,
+    policy: hygeia_store::ListPolicy,
+}
+
+async fn set_list_policy(State(st): S, h: HeaderMap, Json(r): Json<PolicyReq>) -> Response {
+    let (p, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::RulesWrite,
+            r.tenant_id,
+            "list-policy.set"
+        )
+        .await
+    );
+    let before = ok_or!(st.store.list_policy(&tenant).await);
+    ok_or!(st.store.set_list_policy(&tenant, r.policy).await);
+    st.invalidate();
+    st.record(
+        &tenant,
+        &p.actor(),
+        "lists.policy",
+        &tenant,
+        Some(json!({"before": before, "after": r.policy})),
+    )
+    .await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct SubReq {
+    tenant_id: Option<String>,
+    group_id: Option<String>,
+    source_id: String,
+}
+
+async fn subscribe(State(st): S, h: HeaderMap, Json(r): Json<SubReq>) -> Response {
+    let (p, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::RulesWrite,
+            r.tenant_id,
+            "list-subscription.create"
+        )
+        .await
+    );
+    if !st.available_sources().iter().any(|m| m.id == r.source_id) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unknown or disabled list source",
+        )
+            .into_response();
+    }
+    ok_or!(
+        st.store
+            .subscribe(&tenant, r.group_id.as_deref(), &r.source_id)
+            .await
+    );
+    st.invalidate();
+    st.record(
+        &tenant,
+        &p.actor(),
+        "lists.subscribe",
+        &r.source_id,
+        Some(json!({"group": r.group_id})),
+    )
+    .await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct UnsubQ {
+    tenant_id: Option<String>,
+    group_id: Option<String>,
+    source_id: String,
+}
+
+async fn unsubscribe(State(st): S, h: HeaderMap, Query(q): Query<UnsubQ>) -> Response {
+    let (p, tenant) = gate!(
+        guard(
+            &st,
+            &h,
+            Permission::RulesWrite,
+            q.tenant_id,
+            "list-subscription.delete"
+        )
+        .await
+    );
+    ok_or!(
+        st.store
+            .unsubscribe(&tenant, q.group_id.as_deref(), &q.source_id)
+            .await
+    );
+    st.invalidate();
+    st.record(
+        &tenant,
+        &p.actor(),
+        "lists.unsubscribe",
+        &q.source_id,
+        Some(json!({"group": q.group_id})),
+    )
+    .await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
 // ---------------------------------------------------------------- simulate
 
 #[derive(Deserialize)]
@@ -1178,7 +1314,9 @@ mod tests {
                 cosmetic: cos,
             })],
             json!([{"id": "l1", "license": "MIT"}]),
-        );
+        )
+        .await
+        .unwrap();
         let b = st.bundle_for(DEFAULT_TENANT, DEFAULT_GROUP).await.unwrap();
         let bundle = SignedBundle::open(&b.0, &st.signing_key.verifying_key()).unwrap();
         assert_eq!(bundle.network.lists[0].block, vec!["tracker.test"]);
@@ -1202,6 +1340,240 @@ mod tests {
                 .0,
             StatusCode::ACCEPTED
         );
+    }
+
+    #[tokio::test]
+    async fn list_selection_per_tenant_and_group() {
+        use hygeia_core::cosmetic::CosmeticRules;
+        use hygeia_core::{ParsedSource, SourceMeta};
+        let (app, st) = app();
+        st.store.bootstrap_default().await.unwrap();
+        let mk = |id: &str, domain: &str| {
+            Arc::new(ParsedSource {
+                meta: SourceMeta {
+                    id: id.into(),
+                    name: id.into(),
+                    url: format!("https://x/{id}"),
+                    license: "MIT".into(),
+                    attribution: "me".into(),
+                },
+                allow: vec![],
+                block: vec![domain.into()],
+                cosmetic: CosmeticRules::default(),
+            })
+        };
+        st.set_lists(vec![mk("l1", "a.test"), mk("l2", "b.test")], json!([]))
+            .await
+            .unwrap();
+        let ids = |tenant: &str, group: &str| {
+            let st = st.clone();
+            let (tenant, group) = (tenant.to_string(), group.to_string());
+            async move {
+                let b = st.bundle_for(&tenant, &group).await.unwrap();
+                SignedBundle::open(&b.0, &st.signing_key.verifying_key())
+                    .unwrap()
+                    .network
+                    .lists
+                    .into_iter()
+                    .map(|l| l.id)
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        // default policy: everything the platform enabled
+        assert_eq!(ids(DEFAULT_TENANT, DEFAULT_GROUP).await, vec!["l1", "l2"]);
+        let (s, _, b) = call(
+            &app,
+            "GET",
+            "/v1/admin/list-subscriptions",
+            Some(ADMIN),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(j(&b)["policy"], "all");
+        assert_eq!(j(&b)["available"].as_array().unwrap().len(), 2);
+
+        // selected, nothing subscribed: no lists
+        assert_eq!(
+            call(
+                &app,
+                "PUT",
+                "/v1/admin/list-policy",
+                Some(ADMIN),
+                Some(json!({"policy": "selected"}))
+            )
+            .await
+            .0,
+            StatusCode::NO_CONTENT
+        );
+        assert!(
+            ids(DEFAULT_TENANT, DEFAULT_GROUP).await.is_empty(),
+            "bundle must follow the change immediately"
+        );
+
+        // tenant-wide l1, group-only l2
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/v1/admin/list-subscriptions",
+                Some(ADMIN),
+                Some(json!({"source_id": "l1"}))
+            )
+            .await
+            .0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/v1/admin/list-subscriptions",
+                Some(ADMIN),
+                Some(json!({"source_id": "l2", "group_id": DEFAULT_GROUP}))
+            )
+            .await
+            .0,
+            StatusCode::NO_CONTENT
+        );
+        let (_, _, b) = call(
+            &app,
+            "POST",
+            "/v1/admin/groups",
+            Some(ADMIN),
+            Some(json!({"name": "kids"})),
+        )
+        .await;
+        let kids = j(&b)["id"].as_str().unwrap().to_string();
+        assert_eq!(ids(DEFAULT_TENANT, DEFAULT_GROUP).await, vec!["l1", "l2"]);
+        assert_eq!(
+            ids(DEFAULT_TENANT, &kids).await,
+            vec!["l1"],
+            "group subscription must not leak to other groups"
+        );
+
+        // unknown source and foreign group are refused
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/v1/admin/list-subscriptions",
+                Some(ADMIN),
+                Some(json!({"source_id": "nope"}))
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/v1/admin/list-subscriptions",
+                Some(ADMIN),
+                Some(
+                    json!({"source_id": "l1", "group_id": "00000000-0000-0000-0000-0000000000aa"})
+                )
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+
+        // a viewer can read the selection but not change it
+        let (_, _, b) = call(
+            &app,
+            "POST",
+            "/v1/admin/api-tokens",
+            Some(ADMIN),
+            Some(json!({"name": "v", "role": "viewer"})),
+        )
+        .await;
+        let viewer = j(&b)["token"].as_str().unwrap().to_string();
+        assert_eq!(
+            call(
+                &app,
+                "GET",
+                "/v1/admin/list-subscriptions",
+                Some(&viewer),
+                None
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(
+                &app,
+                "PUT",
+                "/v1/admin/list-policy",
+                Some(&viewer),
+                Some(json!({"policy": "all"}))
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                &app,
+                "DELETE",
+                "/v1/admin/list-subscriptions?source_id=l1",
+                Some(&viewer),
+                None
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+
+        // unsubscribe + back to "all"
+        assert_eq!(
+            call(
+                &app,
+                "DELETE",
+                &format!("/v1/admin/list-subscriptions?source_id=l2&group_id={DEFAULT_GROUP}"),
+                Some(ADMIN),
+                None
+            )
+            .await
+            .0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(ids(DEFAULT_TENANT, DEFAULT_GROUP).await, vec!["l1"]);
+        assert_eq!(
+            call(
+                &app,
+                "DELETE",
+                "/v1/admin/list-subscriptions?source_id=l2",
+                Some(ADMIN),
+                None
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(
+                &app,
+                "PUT",
+                "/v1/admin/list-policy",
+                Some(ADMIN),
+                Some(json!({"policy": "all"}))
+            )
+            .await
+            .0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(ids(DEFAULT_TENANT, DEFAULT_GROUP).await, vec!["l1", "l2"]);
+
+        // changes are audited
+        let (_, _, b) = call(&app, "GET", "/v1/admin/audit", Some(ADMIN), None).await;
+        let text = String::from_utf8(b).unwrap();
+        for a in ["lists.policy", "lists.subscribe", "lists.unsubscribe"] {
+            assert!(text.contains(a), "missing audit event {a}");
+        }
     }
 
     // ------------------------------------------------------------ OIDC
