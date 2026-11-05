@@ -18,6 +18,33 @@ use crate::state::{AppState, DEFAULT_GROUP, DEFAULT_TENANT, now};
 
 type S = State<Arc<AppState>>;
 
+/// Non-secret deployment info for the UI (login screen, environment banner).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PublicConfig {
+    /// `production` | `staging` | `dev`
+    pub environment: String,
+    pub break_glass: bool,
+    pub oidc: Option<OidcPublic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OidcPublic {
+    pub issuer: String,
+    pub client_id: String,
+    pub scope: String,
+}
+
+/// API plus the static admin UI served from `ui` (API routes take precedence).
+pub fn router_with_ui(state: Arc<AppState>, ui: crate::ui::Ui) -> Router {
+    let svc = tower::ServiceBuilder::new()
+        .layer(axum::middleware::from_fn_with_state(
+            ui.clone(),
+            crate::ui::headers,
+        ))
+        .service(ui.service());
+    router(state).fallback_service(svc)
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -26,6 +53,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/enroll", post(enroll))
         .route("/v1/bundle", get(bundle))
         // identity
+        .route("/v1/config", get(public_config))
         .route("/v1/me", get(me))
         // administration
         .route("/v1/admin/tenants", get(list_tenants).post(create_tenant))
@@ -229,6 +257,10 @@ async fn bundle(State(st): S, headers: HeaderMap) -> Response {
 }
 
 // ---------------------------------------------------------------- identity
+
+async fn public_config(State(st): S) -> Response {
+    Json(&st.public).into_response()
+}
 
 async fn me(State(st): S, h: HeaderMap) -> Response {
     let p = gate!(authn(&st, &h).await);

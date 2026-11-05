@@ -34,7 +34,21 @@ flowchart TD
 | `hygeia-dns` | UDP server, block via NXDOMAIN/null IP, plain UDP upstream. Missing: TCP, DoT/DoH/DoQ, DoT upstream, tenant resolution, query log, metrics |
 | `hygeia-proxy` | Skeleton (CONNECT host decision) |
 | `hygeia-blocker` | Engine (signature check + rollback guard, URL/host verdicts, cosmetics, DNR plan) native + WASM; Chrome MV3 and Firefox MV3 extension in `extension/` (enrollment, bundle sync, DNR or webRequest blocking, element hiding, scriptlets); Chromium e2e-tested in a real browser, Firefox lint + fake-API tests only (not yet run in real Firefox). Missing: procedural selectors, more scriptlets, per-tenant fail-closed — see `extension/README.md` |
-| `web/` | Not started (planned: Next.js static export + Tailwind, served by the API) |
+| `web/` | Admin UI: Next.js 16 static export + Tailwind, served by the API (no Node at runtime): overview, rules + what-if simulation, devices + one-time enrollment tokens, filter-list status/licenses, audit + chain verification, groups / role bindings / API tokens, tenants. Token and OIDC (authorization code + PKCE) login. Real-browser e2e against the real server and a mock IdP. Missing: OIDC refresh (session ends with the ID token), OpenAPI-generated client, i18n |
+
+## Admin UI
+
+```bash
+(cd web && npm ci && npm run build)            # static export -> web/out
+HYGEIA_ENVIRONMENT=dev HYGEIA_WEB_DIR=web/out cargo run -p hygeia   # UI at http://127.0.0.1:8080/
+```
+
+The binary serves the UI from `api.web_dir` / `HYGEIA_WEB_DIR` (the container image ships it in `/usr/share/hygeia/web`); API routes win over the UI fallback. `next dev` proxies `/v1` to `127.0.0.1:8080`.
+
+- **Login**: API token / break-glass (pasted, validated against `/v1/me`), or single sign-on when `auth.oidc.client_id` is set. SSO is the authorization-code flow with PKCE S256, state and nonce; the UI sends the **ID token**, so `auth.oidc.audience` must equal the client id (or an audience your IdP puts in the ID token). The IdP must allow CORS on its token endpoint for the UI origin; add its origin to `auth.oidc.ui_connect_src` if it differs from the issuer's. There is no refresh: the session ends when the ID token expires.
+- **Credential storage**: `sessionStorage` (per tab, never persisted). An XSS could read it, so the UI ships a strict **CSP without `unsafe-inline` scripts**: SHA-256 hashes of Next's inline bootstrap scripts are computed from the build at startup. Also `frame-ancestors 'none'`, `nosniff`, `no-referrer`; API data is rendered through React escaping only.
+- **One-time secrets** (enrollment tokens, API tokens) are shown once and never stored by the UI.
+- The UI hides what a role cannot do, but authorisation is enforced by the API; a 403 is shown as a message.
 
 ## Filter lists
 

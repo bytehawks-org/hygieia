@@ -271,6 +271,19 @@ impl MemoryStore {
 #[async_trait]
 impl Store for MemoryStore {
     async fn bootstrap_default(&self) -> Result<()> {
+        let mut s = self.s.lock().unwrap();
+        if !s.tenants.iter().any(|t| t.id == DEFAULT_TENANT_ID) {
+            s.tenants.push(Tenant {
+                id: DEFAULT_TENANT_ID.into(),
+                slug: "default".into(),
+                name: "Default".into(),
+            });
+            s.groups.push(Group {
+                id: DEFAULT_GROUP_ID.into(),
+                tenant_id: DEFAULT_TENANT_ID.into(),
+                name: "default".into(),
+            });
+        }
         Ok(())
     }
 
@@ -665,5 +678,12 @@ mod tests {
         let st = MemoryStore::new();
         crate::conformance::run(&st, ("t1", "g1", "g1b"), ("t2", "g2")).await;
         crate::conformance::run_identity(&MemoryStore::new()).await;
+
+        // the default tenant/group exist after bootstrap (idempotent)
+        let st = MemoryStore::new();
+        st.bootstrap_default().await.unwrap();
+        st.bootstrap_default().await.unwrap();
+        assert_eq!(st.list_groups(DEFAULT_TENANT_ID).await.unwrap().len(), 1);
+        assert!(st.create_group(DEFAULT_TENANT_ID, "staff").await.is_ok());
     }
 }

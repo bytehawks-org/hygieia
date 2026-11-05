@@ -54,6 +54,12 @@ pub struct OidcSection {
     /// Empty = OIDC disabled.
     pub issuer: String,
     pub audience: String,
+    /// Public client id used by the admin UI for the authorization-code + PKCE flow
+    /// (empty = no SSO button). The UI sends the ID token, so `audience` must be this
+    /// client id unless your IdP issues a dedicated audience.
+    pub client_id: String,
+    /// Extra origins the UI may call (token endpoint when it differs from the issuer origin).
+    pub ui_connect_src: Vec<String>,
     pub leeway_secs: u64,
     /// Lab only.
     pub allow_insecure_http: bool,
@@ -66,6 +72,8 @@ impl Default for OidcSection {
         Self {
             issuer: String::new(),
             audience: "hygeia-api".into(),
+            client_id: String::new(),
+            ui_connect_src: Vec::new(),
             leeway_secs: 30,
             allow_insecure_http: false,
             bootstrap_owners: Vec::new(),
@@ -127,11 +135,15 @@ impl ListsSection {
 #[serde(default, deny_unknown_fields)]
 pub struct ApiConfig {
     pub listen: String,
+    /// Built admin UI (Next.js static export). Empty = `HYGEIA_WEB_DIR`, else
+    /// `/usr/share/hygeia/web` if it exists, else no UI.
+    pub web_dir: String,
 }
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
             listen: "127.0.0.1:8080".into(),
+            web_dir: String::new(),
         }
     }
 }

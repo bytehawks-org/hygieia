@@ -9,10 +9,11 @@ pub mod build;
 pub mod oidc;
 mod routes;
 mod state;
+pub mod ui;
 
 pub use auth::{AuthConfig, BreakGlass, Principal};
 pub use oidc::{OidcConfig, OidcVerifier};
-pub use routes::router;
+pub use routes::{OidcPublic, PublicConfig, router, router_with_ui};
 pub use state::{AppState, DEFAULT_GROUP, DEFAULT_TENANT, now};
 
 pub use axum::Router;

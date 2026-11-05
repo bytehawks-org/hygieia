@@ -25,6 +25,8 @@ pub struct AppState {
     pub store: Arc<dyn Store>,
     pub signing_key: SigningKey,
     pub auth: AuthConfig,
+    /// Non-secret settings the UI needs before login (`GET /v1/config`).
+    pub public: crate::routes::PublicConfig,
     lists: RwLock<Vec<Arc<ParsedSource>>>,
     list_status: RwLock<Value>,
     /// Notified by `POST /v1/admin/lists/refresh`; the list refresher awaits it.
@@ -38,6 +40,7 @@ impl AppState {
             store,
             signing_key,
             auth,
+            public: Default::default(),
             lists: RwLock::new(Vec::new()),
             list_status: RwLock::new(Value::Array(vec![])),
             refresh_requested: Arc::new(tokio::sync::Notify::new()),

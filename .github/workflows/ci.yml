@@ -50,3 +50,32 @@ jobs:
       - run: node --test extension/test/*.test.mjs
       - run: node extension/package.mjs firefox
       - run: npx --yes web-ext@10 lint -s extension/dist/firefox
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run typecheck
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - run: cargo build -p hygeia
+      - name: Install Playwright (end-to-end)
+        working-directory: web
+        run: |
+          npm install --no-save playwright
+          npx playwright install --with-deps chromium
+      - name: UI end-to-end
+        working-directory: web
+        run: node test/e2e.mjs

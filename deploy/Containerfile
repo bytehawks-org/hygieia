@@ -1,3 +1,10 @@
+FROM docker.io/library/node:22-bookworm-slim AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
 FROM docker.io/library/rust:1-bookworm AS build
 WORKDIR /src
 COPY . .
@@ -5,6 +12,7 @@ RUN cargo build --release -p hygeia
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /src/target/release/hygeia /usr/local/bin/hygeia
-# api 8080/tcp, dns 5353/udp (override via hygeia.toml, mount at /etc/hygeia/hygeia.toml)
+COPY --from=web /web/out /usr/share/hygeia/web
+# api + admin UI 8080/tcp, dns 5353/udp (override via hygeia.toml, mount at /etc/hygeia/hygeia.toml)
 EXPOSE 8080/tcp 5353/udp
 ENTRYPOINT ["/usr/local/bin/hygeia"]

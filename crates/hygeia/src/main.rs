@@ -6,7 +6,8 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use ed25519_dalek::SigningKey;
 use hygeia_api::{
-    AppState, AuthConfig, BreakGlass, DEFAULT_GROUP, DEFAULT_TENANT, OidcConfig, OidcVerifier,
+    AppState, AuthConfig, BreakGlass, DEFAULT_GROUP, DEFAULT_TENANT, OidcConfig, OidcPublic,
+    OidcVerifier, PublicConfig,
 };
 use hygeia_core::{Ruleset, SignedBundle};
 use hygeia_dns::{BlockMode, DnsConfig};
@@ -66,8 +67,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     store.bootstrap_default().await?;
-    let auth = build_auth(&cfg, &store).await?;
-    let state = Arc::new(AppState::new(store, signing_key, auth));
+    let (auth, public) = build_auth(&cfg, &store).await?;
+    let mut state = AppState::new(store, signing_key, auth);
+    state.public = public;
+    let state = Arc::new(state);
 
     // Data plane: DNS follows the control plane by pulling the signed bundle.
     if cfg.dns.enabled {
@@ -157,7 +160,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(&cfg.api.listen).await?;
     tracing::info!(listen = %cfg.api.listen, "api listening");
-    axum_serve(listener, hygeia_api::router(state)).await
+    let web_dir = if !cfg.api.web_dir.is_empty() {
+        Some(cfg.api.web_dir.clone())
+    } else if let Ok(d) = std::env::var("HYGEIA_WEB_DIR") {
+        Some(d)
+    } else {
+        std::path::Path::new("/usr/share/hygeia/web")
+            .is_dir()
+            .then(|| "/usr/share/hygeia/web".to_string())
+    };
+    let app = match web_dir {
+        Some(dir) => {
+            let mut connect: Vec<String> = cfg.auth.oidc.ui_connect_src.clone();
+            if let Some(origin) = origin_of(&cfg.auth.oidc.issuer) {
+                connect.push(origin);
+            }
+            let ui = hygeia_api::ui::Ui::load(&dir, &connect)?;
+            tracing::info!(%dir, "admin UI enabled");
+            hygeia_api::router_with_ui(state, ui)
+        }
+        None => hygeia_api::router(state),
+    };
+    axum_serve(listener, app).await
 }
 
 async fn axum_serve(
@@ -175,7 +199,7 @@ async fn axum_serve(
 async fn build_auth(
     cfg: &config::Config,
     store: &Arc<dyn Store>,
-) -> Result<AuthConfig, Box<dyn std::error::Error>> {
+) -> Result<(AuthConfig, PublicConfig), Box<dyn std::error::Error>> {
     use config::Environment;
     let mut env = cfg.auth.environment;
     if let Ok(v) = std::env::var("HYGEIA_ENVIRONMENT") {
@@ -250,5 +274,20 @@ async fn build_auth(
             "no admin authentication configured (set [auth.oidc], or environment = \"dev\"/\"staging\" with break-glass): the admin API is unusable"
         );
     }
-    Ok(AuthConfig { break_glass, oidc })
+    let public = PublicConfig {
+        environment: format!("{env:?}").to_lowercase(),
+        break_glass: break_glass.is_some(),
+        oidc: (oidc.is_some() && !o.client_id.is_empty()).then(|| OidcPublic {
+            issuer: o.issuer.clone(),
+            client_id: o.client_id.clone(),
+            scope: "openid email profile".into(),
+        }),
+    };
+    Ok((AuthConfig { break_glass, oidc }, public))
+}
+
+/// `https://host:port/path` -> `https://host:port`
+fn origin_of(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    Some(format!("{scheme}://{}", rest.split('/').next()?))
 }
