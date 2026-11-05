@@ -23,10 +23,10 @@
 
     <!-- Public properties: the wizard writes nothing itself, `hygeia-proxy setup` validates them. -->
     <Property Id="MODE" Value="standalone" />
-    <Property Id="UPSTREAM_URL" />
-    <Property Id="UPSTREAM_KEY" />
+    <Property Id="UPSTREAM_URL" Secure="yes" />
+    <Property Id="UPSTREAM_KEY" Secure="yes" />
     <Property Id="LOCAL_DNS" Value="false" />
-    <Property Id="DNS_UPSTREAM" />
+    <Property Id="DNS_UPSTREAM" Secure="yes" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Hygieia">
@@ -78,13 +78,15 @@
     <!-- Also runs for the old version during an upgrade; state in %ProgramData%\Hygeia is kept. -->
     <CustomAction Id="ServiceUninstall" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="ignore"
       ExeCommand="&quot;[INSTALLFOLDER]hygeia-proxy.exe&quot; service uninstall" />
-    <CustomAction Id="TrayStop" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="ignore"
+    <CustomAction Id="TrayStopRemove" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="ignore"
+      ExeCommand="taskkill /F /IM hygeia-tray.exe" />
+    <CustomAction Id="TrayStopInstall" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="ignore"
       ExeCommand="taskkill /F /IM hygeia-tray.exe" />
 
     <InstallExecuteSequence>
       <Custom Action="ServiceUninstall" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
-      <Custom Action="TrayStop" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
-      <Custom Action="TrayStop" Before="InstallFiles" Condition="NOT REMOVE" />
+      <Custom Action="TrayStopRemove" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="TrayStopInstall" Before="InstallFiles" Condition="NOT REMOVE" />
       <Custom Action="HygieiaSetup" After="InstallFiles" Condition="NOT Installed AND NOT REMOVE" />
       <Custom Action="ServiceInstall" After="HygieiaSetup" Condition="NOT Installed AND NOT REMOVE" />
       <Custom Action="ServiceStart" After="ServiceInstall" Condition="NOT Installed AND NOT REMOVE" />
