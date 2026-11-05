@@ -6,11 +6,11 @@ Order matters: items 1–4 were requested ahead of the previously suggested step
 
 | # | Item | Why / outcome | Depends on |
 |---|---|---|---|
-| 1 | **Node core** (`hygeia-proxy` as installable node, standalone mode) | One binary: local DNS + bundle feed for the extension + embedded control plane with a file-backed store; runs in the foreground on Linux and Windows (cross-compiled) | design: `docs/architecture/node.md` |
+| 1 | **Node core** (`hygeia-proxy` as installable node, standalone mode) | One binary: bundle feed for the extension + embedded control plane with a file-backed store + local UI; **DNS off by default, opt-in** (local filtering or forward to the cloud service); runs in the foreground on Linux and Windows (cross-compiled) | design: `docs/architecture/node.md` |
 | 2 | **Connected mode** | Node enrols with a central server (`hyg_node_` credential), relays browser enrolments, fetches/verifies/caches central bundles on disk, keeps enforcing during outages, forwards audit/telemetry | 1, central node endpoints (`/v1/node/*`) |
 | 3 | **Central redundancy** | Several server instances behind a load balancer: bundles compiled once and persisted in PostgreSQL (stable ETag/version), coordinated list refresh, health/readiness, graceful shutdown | PostgreSQL store |
-| 4 | **Packaging, service and graphical mode** | systemd unit + `.deb`/`.rpm`, Windows service + MSI, tray icon, local UI first-run wizard, OS-resolver integration with safe revert; `windows-latest` CI job | 1 (2 for connected wizard) |
-| 5 | **DNS multi-tenant on the server** | DoH token path, DoT SNI, source CIDR → tenant; DoT/DoH upstream; query log with IP pseudonymisation and retention; metrics | 3 (replicas), shared by the node's upstream support |
+| 4 | **Packaging, service and graphical mode** | systemd unit + `.deb`/`.rpm`, Windows service + MSI, tray icon, local UI first-run wizard; OS-resolver integration only as an explicit opt-in step, with safe revert; `windows-latest` CI job | 1 (2 for connected wizard) |
+| 5 | **Cloud DNS service** (SaaS, multi-tenant) | Filtering DNS facing the Internet: DoH token path, DoT SNI, registered CIDRs; never an open resolver; rate limiting; DoT/DoH upstream; query log with IP pseudonymisation and retention; metrics. Also the target of the node's *cloud forward* option. Constraints: `docs/architecture/dns-service.md` | 3 (replicas) |
 | 6 | **OpenAPI + generated client** | utoipa schema, generated TypeScript client replaces the hand-written types | — |
 
 ## Done

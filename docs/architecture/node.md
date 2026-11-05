@@ -2,12 +2,14 @@
 
 One installable binary for Linux and Windows. It is a **light local server** for a single machine or small site, and, when pointed at a central Hygieia server, an **endpoint/connector** for that server. The central server owns RBAC, configuration and audit; nodes enforce.
 
+**DNS is not required on the node and is off by default.** The default install is the extension connector plus local UI: no port 53, no change to the operating system's resolver. DNS filtering is an opt-in with three choices (see *DNS options*): local filtering on the node, a local stub that forwards to the cloud DNS service, or no node involvement at all (the OS/router points at the cloud service directly).
+
 ```mermaid
 flowchart LR
   subgraph PC["Endpoint (Linux / Windows)"]
     EXT[Browser extension] -->|enroll + bundle pull| NODE
     OS[OS resolver 127.0.0.1] -->|DNS| NODE
-    NODE["hygeia-proxy (node)<br/>DNS + bundle feed + local UI + tray"]
+    NODE["hygeia-proxy (node)<br/>bundle feed + local UI + tray<br/>(DNS: opt-in)"]
   end
   NODE -. standalone: own lists, own rules, own signing key .-> NODE
   NODE == connected: enrol, signed bundles, telemetry ==> LB
@@ -17,6 +19,8 @@ flowchart LR
     S1 & S2 --> PG[(PostgreSQL)]
   end
   EXT2[Extension on another PC] -->|may talk to the central server directly| LB
+  OS -. opt-in: DoH/DoT .-> DNSSAAS[Cloud DNS service<br/>DoH token path / DoT SNI]
+  DNSSAAS --- LB
 ```
 
 ## Modes
@@ -32,12 +36,25 @@ flowchart LR
 
 ## Roles of the node
 
-1. **Local DNS server** (UDP/TCP on 127.0.0.1 by default; DoT/DoH upstream). Standalone or connected, same engine as the central DNS.
-2. **Extension connector.** The extension's server URL is the node. The node serves the same `/v1/enroll`, `/v1/bundle`, `/v1/pubkey` contract as the central server:
+1. **Extension connector** (the default, always on). The extension's server URL is the node. The node serves the same `/v1/enroll`, `/v1/bundle`, `/v1/pubkey` contract as the central server:
    - standalone: enrolment is local; bundles are signed by the node;
    - connected: enrolment is **relayed** to the central server (so every browser shows up as a device under central RBAC), bundles are fetched with the node's credential, **verified, cached and served unchanged** (central signature preserved, extension pins the central key).
-3. **Local admin UI + tray icon** (graphical configuration): the existing Next.js admin UI served on `127.0.0.1`, plus a native tray icon (status, open dashboard, pause blocking 5/30/60 min). First-run wizard in the UI: pick mode, set upstream resolver, optionally enrol against a server.
+2. **Local admin UI + tray icon** (graphical configuration): the existing Next.js admin UI served on `127.0.0.1`, plus a native tray icon (status, open dashboard, pause blocking 5/30/60 min). First-run wizard in the UI: pick mode, set upstream resolver, optionally enrol against a server.
+3. **Local DNS** (opt-in, see below).
 4. *(later, optional)* HTTP(S) proxy / PAC and selective MITM (tier 3). Not needed for the extension flow.
+
+## DNS options (all opt-in)
+
+| Option | Node does | Resolver of the machine | Filtering happens | Works offline |
+|---|---|---|---|---|
+| **off** (default) | nothing | unchanged | extension only (URLs, cosmetic); other apps unfiltered | yes |
+| **local** | DNS server enforcing the verified bundle (standalone: own rules/lists; connected: central policy) | `127.0.0.1` | on the machine | yes (last bundle) |
+| **cloud forward** | local stub (127.0.0.1) that forwards over DoH/DoT to the SaaS DNS endpoint of the tenant, token embedded; no bundle needed for DNS | `127.0.0.1` | in the cloud | no (falls back per policy) |
+| **cloud direct** | nothing | set to the tenant's DoH/DoT endpoint (Windows 11 DoH template URL, Android Private DNS, router) | in the cloud | no |
+
+Cloud forward exists for operating systems or networks that cannot use DoH/DoT natively and as the place where "pause blocking" and local caching live. Whatever the option, the extension keeps working independently.
+
+The SaaS DNS service is a first-class feature of the central server, not an afterthought: its constraints (no open resolver, tenant identification, privacy, data residency) are in `docs/architecture/dns-service.md`.
 
 ## Credentials (connected mode)
 
@@ -57,9 +74,9 @@ The server data plane is already stateless **except** the per-process bundle cac
 - Local UI/API bind to loopback only, require a credential generated at install (file readable only by the owning user/service account) **and** validate the `Host`/`Origin` headers (DNS-rebinding and cross-site requests against a localhost admin port are a real attack).
 - The node never exposes unauthenticated admin endpoints on LAN interfaces; serving other LAN clients as DNS is an explicit opt-in.
 - Bundle signature is verified on every fetch; downgrade (lower version) refused, as in the extension.
-- Changing the OS resolver is reversible and recorded; uninstall restores the previous settings.
+- Changing the OS resolver never happens implicitly: it is an explicit opt-in step (wizard or CLI), reversible and recorded; uninstall restores the previous settings.
 
-## OS integration
+## OS integration (only needed when DNS is *local* or *cloud forward*)
 
 | | Linux | Windows |
 |---|---|---|
@@ -69,7 +86,9 @@ The server data plane is already stateless **except** the per-process bundle cac
 | Package | `.deb`, `.rpm` (cargo-deb, cargo-generate-rpm), static musl tarball | MSI (WiX), Authenticode-signed |
 | Tray | `tray-icon` (AppIndicator on GNOME needs the extension) | `tray-icon` |
 
-**Resolver safety net:** if the node dies, a machine whose only resolver is 127.0.0.1 loses DNS. Mitigations: service supervision/restart, health-gated configuration (the node removes itself from the OS resolver list on clean shutdown), and an optional secondary resolver (documented trade-off: bypass).
+With DNS off (default) none of this applies and the install touches no network settings.
+
+**Resolver safety net** (only when the OS resolver points at the node): if the node dies, a machine whose only resolver is 127.0.0.1 loses DNS. Mitigations: service supervision/restart, health-gated configuration (the node removes itself from the OS resolver list on clean shutdown), and an optional secondary resolver (documented trade-off: bypass).
 
 ## Assumptions made (change if wrong)
 
@@ -77,6 +96,7 @@ The server data plane is already stateless **except** the per-process bundle cac
 - "Graphical mode" = tray icon + local web UI (reuses the existing admin UI, same codebase on every OS), not a native widget toolkit.
 - Standalone persistence = a file-backed store (atomic snapshot of the in-memory store, including the audit chain), not SQLite: the PostgreSQL schema relies on RLS and functions that do not port, and one machine does not need a database.
 - macOS is out of scope for now.
+- Node DNS (`local` / `cloud forward`) is off by default; enabling it is a deliberate user action, never part of install.
 
 ## Verification limits
 
