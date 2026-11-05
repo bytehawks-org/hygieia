@@ -6,7 +6,8 @@ use hygeia_audit::Draft;
 
 use crate::rbac::Role;
 use crate::{
-    CatalogSource, ListPolicy, Rule, RuleAction, Selection, Store, StoreError, Subscription,
+    CatalogSource, ListPolicy, Rule, RuleAction, Selection, Store, StoreError, StoredBundle,
+    Subscription,
 };
 
 fn draft(tenant: &str, n: i64) -> Draft {
@@ -108,12 +109,56 @@ pub async fn run(st: &dyn Store, a: (&str, &str, &str), b: (&str, &str)) {
     );
     st.delete_rule(ta, &r_all.id).await.unwrap();
     assert_eq!(st.list_rules(ta).await.unwrap().len(), 2);
-    let _ = gb;
+    let _ = &gb;
 
     // --- bundle versions are monotonic per (tenant, group) ---
     assert_eq!(st.next_bundle_version(ta, ga).await.unwrap(), 1);
     assert_eq!(st.next_bundle_version(ta, ga).await.unwrap(), 2);
     assert_eq!(st.next_bundle_version(ta, ga2).await.unwrap(), 1);
+
+    // --- compiled bundles: shared, first writer of an input set wins, versions only go up ---
+    assert!(st.load_compiled(ta, ga).await.unwrap().is_none());
+    let sb = |h: &str, v: u64, b: &[u8]| StoredBundle {
+        inputs_hash: h.into(),
+        version: v,
+        bytes: b.to_vec(),
+    };
+    assert_eq!(
+        st.store_compiled(ta, ga, sb("h1", 3, b"one"))
+            .await
+            .unwrap(),
+        sb("h1", 3, b"one")
+    );
+    assert_eq!(
+        st.store_compiled(ta, ga, sb("h1", 4, b"dup"))
+            .await
+            .unwrap(),
+        sb("h1", 3, b"one"),
+        "same inputs: the stored bundle wins"
+    );
+    assert_eq!(
+        st.store_compiled(ta, ga, sb("h2", 2, b"old"))
+            .await
+            .unwrap(),
+        sb("h1", 3, b"one"),
+        "a lower version never replaces a higher one"
+    );
+    assert_eq!(
+        st.store_compiled(ta, ga, sb("h2", 5, b"two"))
+            .await
+            .unwrap(),
+        sb("h2", 5, b"two")
+    );
+    assert_eq!(
+        st.load_compiled(ta, ga).await.unwrap(),
+        Some(sb("h2", 5, b"two"))
+    );
+    assert!(st.load_compiled(ta, ga2).await.unwrap().is_none());
+    assert!(
+        st.load_compiled(tb, gb).await.unwrap().is_none(),
+        "tenant isolation"
+    );
+    st.ping().await.unwrap();
 
     // --- audit: one chain per tenant ---
     for n in 0..5 {

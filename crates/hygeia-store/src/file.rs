@@ -356,6 +356,24 @@ impl Store for FileStore {
         self.inner.list_rules(tenant_id).await
     }
 
+    // Compiled bundles are a cache: not persisted, rebuilt after a restart.
+    async fn load_compiled(&self, t: &str, g: &str) -> Result<Option<crate::StoredBundle>> {
+        self.inner.load_compiled(t, g).await
+    }
+
+    async fn store_compiled(
+        &self,
+        t: &str,
+        g: &str,
+        c: crate::StoredBundle,
+    ) -> Result<crate::StoredBundle> {
+        self.inner.store_compiled(t, g, c).await
+    }
+
+    async fn ping(&self) -> Result<()> {
+        Ok(())
+    }
+
     async fn next_bundle_version(&self, tenant_id: &str, group_id: &str) -> Result<u64> {
         let r = self.inner.next_bundle_version(tenant_id, group_id).await;
         if r.is_ok() {

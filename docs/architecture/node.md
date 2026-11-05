@@ -77,12 +77,17 @@ Not yet: local DNS in connected mode (rejected by config validation), audit/tele
 
 ## Central redundancy (several instances)
 
-The server data plane is already stateless **except** the per-process bundle cache. Required before running replicas:
+Implemented:
 
-- compile bundles once, **persist them in PostgreSQL** keyed by (tenant, group, inputs-hash) with a stable ETag, under a Postgres advisory lock; every replica serves the stored bytes (same ETag/version everywhere);
-- list refresh coordinated by an advisory lock (one downloader, others read the result);
-- health/readiness endpoints for the load balancer; graceful shutdown;
-- DNS (DoT/DoH/DoQ) with tenant resolution and query-log ingestion on the replicas.
+- **Bundles are compiled once and shared.** A bundle is identified by `inputs_hash` = SHA-256 over tenant, group, the signing public key, the group's rules and the content fingerprint of the selected lists. Replicas look the hash up in `compiled_bundles` (PostgreSQL, RLS) and serve the stored bytes: same version, same ETag everywhere. On a miss a replica compiles and publishes with `store_compiled`, serialised by a transaction-level advisory lock per (tenant, group); the first publisher of an input set wins, a lower version never replaces a higher one. Unchanged inputs no longer bump the version (stable ETag across list refreshes that change nothing).
+- **Freshness across replicas:** each replica re-checks the store at most every 5 s (`CACHE_TTL`); local changes invalidate at once. A rule added through replica A is therefore served by B within 5 s.
+- **Probes:** `/healthz` (liveness), `/readyz` (store reachable, 503 otherwise). SIGTERM and Ctrl-C drain in-flight requests.
+
+Known limits (not solved):
+
+- Each replica downloads and parses the lists itself. Replicas that hold different list generations (different download times) compute different input hashes and can publish alternately until all have refreshed; versions stay monotonic, clients never regress, but ETags may change more often than necessary during that window. A coordinated refresh (one leader persists the parsed result) is future work.
+- The signing key must be the same on all replicas (`HYGEIA_SIGNING_KEY`); a replica with another key produces another input hash and the bundles alternate.
+- DNS (DoT/DoH/DoQ) with tenant resolution and query-log ingestion on replicas belongs to item 5.
 
 ## Local security constraints (decided up front)
 

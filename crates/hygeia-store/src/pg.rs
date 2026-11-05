@@ -7,6 +7,7 @@ use hygeia_audit::{Draft, Event, GENESIS};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::{Postgres, Row, Transaction};
 
+use crate::StoredBundle;
 use crate::rbac::Role;
 use crate::{
     ApiToken, AuditStatus, Binding, CatalogSource, DEFAULT_GROUP_ID, DEFAULT_TENANT_ID, Device,
@@ -354,6 +355,85 @@ impl Store for PgStore {
         .map_err(map_err)?;
         tx.commit().await.map_err(map_err)?;
         Ok(v as u64)
+    }
+
+    async fn load_compiled(&self, tenant_id: &str, group_id: &str) -> Result<Option<StoredBundle>> {
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        let row = sqlx::query(
+            "select inputs_hash, version, bytes from compiled_bundles
+             where tenant_id = $1::uuid and group_id = $2::uuid",
+        )
+        .bind(tenant_id)
+        .bind(group_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_err)?;
+        tx.commit().await.map_err(map_err)?;
+        Ok(row.map(|r| StoredBundle {
+            inputs_hash: r.get("inputs_hash"),
+            version: r.get::<i64, _>("version") as u64,
+            bytes: r.get("bytes"),
+        }))
+    }
+
+    async fn store_compiled(
+        &self,
+        tenant_id: &str,
+        group_id: &str,
+        c: StoredBundle,
+    ) -> Result<StoredBundle> {
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        // Serialise concurrent publishers of the same (tenant, group) across replicas.
+        sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("compiled:{tenant_id}:{group_id}"))
+            .execute(&mut *tx)
+            .await
+            .map_err(map_err)?;
+        let cur = sqlx::query(
+            "select inputs_hash, version, bytes from compiled_bundles
+             where tenant_id = $1::uuid and group_id = $2::uuid",
+        )
+        .bind(tenant_id)
+        .bind(group_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_err)?
+        .map(|r| StoredBundle {
+            inputs_hash: r.get("inputs_hash"),
+            version: r.get::<i64, _>("version") as u64,
+            bytes: r.get("bytes"),
+        });
+        let winner = match cur {
+            Some(cur) if cur.inputs_hash == c.inputs_hash || cur.version >= c.version => cur,
+            _ => {
+                sqlx::query(
+                    "insert into compiled_bundles (tenant_id, group_id, inputs_hash, version, bytes)
+                     values ($1::uuid, $2::uuid, $3, $4, $5)
+                     on conflict (tenant_id, group_id) do update
+                       set inputs_hash = excluded.inputs_hash, version = excluded.version,
+                           bytes = excluded.bytes, created_at = now()",
+                )
+                .bind(tenant_id)
+                .bind(group_id)
+                .bind(&c.inputs_hash)
+                .bind(c.version as i64)
+                .bind(&c.bytes)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_err)?;
+                c
+            }
+        };
+        tx.commit().await.map_err(map_err)?;
+        Ok(winner)
+    }
+
+    async fn ping(&self) -> Result<()> {
+        sqlx::query("select 1")
+            .execute(&self.pool)
+            .await
+            .map_err(map_err)?;
+        Ok(())
     }
 
     async fn sync_catalog(&self, sources: &[CatalogSource]) -> Result<()> {

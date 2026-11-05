@@ -121,6 +121,20 @@ pub trait Store: Send + Sync {
 
     async fn next_bundle_version(&self, tenant_id: &str, group_id: &str) -> Result<u64>;
 
+    /// Latest compiled bundle for (tenant, group), shared by all replicas.
+    async fn load_compiled(&self, tenant_id: &str, group_id: &str) -> Result<Option<StoredBundle>>;
+    /// Atomic publish of a compiled bundle. If a stored bundle already has the same `inputs_hash`
+    /// (another replica won the race) it is returned and `candidate` is discarded; otherwise the
+    /// candidate replaces the stored one when its version is higher. The winner is returned.
+    async fn store_compiled(
+        &self,
+        tenant_id: &str,
+        group_id: &str,
+        candidate: StoredBundle,
+    ) -> Result<StoredBundle>;
+    /// Cheap liveness check of the backing store (readiness probe).
+    async fn ping(&self) -> Result<()>;
+
     // ---- filter-list selection ----
     /// Upsert the platform catalogue (idempotent). Sources are never deleted: subscriptions keep referring to them.
     async fn sync_catalog(&self, sources: &[CatalogSource]) -> Result<()>;
@@ -289,6 +303,14 @@ pub enum RuleAction {
     Block,
 }
 
+/// A compiled, signed bundle plus the hash of the inputs it was built from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredBundle {
+    pub inputs_hash: String,
+    pub version: u64,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rule {
     pub id: String,
@@ -306,6 +328,7 @@ pub(crate) struct State {
     pub(crate) devices: HashMap<String, Device>,
     pub(crate) rules: Vec<Rule>,
     pub(crate) bundle_version: HashMap<(String, String), u64>,
+    pub(crate) compiled: HashMap<(String, String), StoredBundle>,
     pub(crate) audit: HashMap<String, AuditLog>,
     pub(crate) tenants: Vec<Tenant>,
     pub(crate) groups: Vec<Group>,
@@ -493,6 +516,38 @@ impl Store for MemoryStore {
             .or_insert(0);
         *v += 1;
         Ok(*v)
+    }
+
+    async fn load_compiled(&self, tenant_id: &str, group_id: &str) -> Result<Option<StoredBundle>> {
+        let s = self.s.lock().unwrap();
+        Ok(s.compiled
+            .get(&(tenant_id.to_string(), group_id.to_string()))
+            .cloned())
+    }
+
+    async fn store_compiled(
+        &self,
+        tenant_id: &str,
+        group_id: &str,
+        candidate: StoredBundle,
+    ) -> Result<StoredBundle> {
+        let mut s = self.s.lock().unwrap();
+        let key = (tenant_id.to_string(), group_id.to_string());
+        match s.compiled.get(&key) {
+            Some(cur)
+                if cur.inputs_hash == candidate.inputs_hash || cur.version >= candidate.version =>
+            {
+                Ok(cur.clone())
+            }
+            _ => {
+                s.compiled.insert(key, candidate.clone());
+                Ok(candidate)
+            }
+        }
+    }
+
+    async fn ping(&self) -> Result<()> {
+        Ok(())
     }
 
     async fn sync_catalog(&self, sources: &[CatalogSource]) -> Result<()> {

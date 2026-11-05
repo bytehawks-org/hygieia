@@ -123,6 +123,18 @@ async fn axum_serve(
     app: hygeia_api::Router,
 ) -> Result<(), Box<dyn std::error::Error>> {
     hygeia_api::serve(l, app, async {
+        // SIGTERM (orchestrators, systemd) and Ctrl-C both drain in-flight requests.
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            if let Ok(mut term) = signal(SignalKind::terminate()) {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+                return;
+            }
+        }
         let _ = tokio::signal::ctrl_c().await;
     })
     .await?;

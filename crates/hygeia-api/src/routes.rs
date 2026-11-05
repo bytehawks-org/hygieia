@@ -50,6 +50,7 @@ pub fn router_with_ui(state: Arc<AppState>, ui: crate::ui::Ui) -> Router {
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/readyz", get(readyz))
         // data plane (device credentials)
         .route("/v1/pubkey", get(pubkey))
         .route("/v1/enroll", post(enroll))
@@ -193,6 +194,17 @@ macro_rules! gate {
 }
 
 // ---------------------------------------------------------------- data plane
+
+/// Readiness for load balancers: the replica can reach its store. (`/healthz` is liveness only.)
+async fn readyz(State(st): S) -> Response {
+    match st.store.ping().await {
+        Ok(()) => (StatusCode::OK, "ready").into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "readiness check failed");
+            (StatusCode::SERVICE_UNAVAILABLE, "store unavailable").into_response()
+        }
+    }
+}
 
 async fn pubkey(State(st): S) -> String {
     st.signing_key
@@ -1885,5 +1897,74 @@ mod tests {
         .unwrap();
         assert_eq!(me(hs).await, StatusCode::UNAUTHORIZED);
         assert_eq!(me("not.a.jwt".into()).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn replicas_sharing_a_store_serve_identical_bundles() {
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        store.bootstrap_default().await.unwrap();
+        let mk = || {
+            Arc::new(
+                AppState::new(
+                    store.clone(),
+                    SigningKey::from_bytes(&[1u8; 32]),
+                    AuthConfig {
+                        break_glass: Some(BreakGlass::new(ADMIN, None).unwrap()),
+                        ..Default::default()
+                    },
+                )
+                .with_cache_ttl(Duration::ZERO),
+            )
+        };
+        let (a, b) = (mk(), mk());
+        let (ra, rb) = (router(a.clone()), router(b.clone()));
+
+        let (c, _, _) = call(&ra, "GET", "/readyz", None, None).await;
+        assert_eq!(c, StatusCode::OK);
+
+        let (_, _, tok) = call(
+            &ra,
+            "POST",
+            "/v1/admin/enrollment-tokens",
+            Some(ADMIN),
+            Some(json!({})),
+        )
+        .await;
+        let tok: serde_json::Value = serde_json::from_slice(&tok).unwrap();
+        let (_, _, dev) = call(
+            &ra,
+            "POST",
+            "/v1/enroll",
+            None,
+            Some(json!({"token": tok["token"], "device_info": "d"})),
+        )
+        .await;
+        let dev: serde_json::Value = serde_json::from_slice(&dev).unwrap();
+        let secret = dev["device_secret"].as_str().unwrap().to_string();
+
+        let (s1, h1, b1) = call(&ra, "GET", "/v1/bundle", Some(&secret), None).await;
+        let (s2, h2, b2) = call(&rb, "GET", "/v1/bundle", Some(&secret), None).await;
+        assert_eq!((s1, s2), (StatusCode::OK, StatusCode::OK));
+        assert_eq!(b1, b2, "same bytes on every replica");
+        assert_eq!(h1["etag"], h2["etag"]);
+
+        // a rule added through replica A reaches replica B (cache freshness window = 0 here)
+        let (c, _, _) = call(
+            &ra,
+            "POST",
+            "/v1/admin/rules",
+            Some(ADMIN),
+            Some(json!({"action": "block", "pattern": "ads.example.com"})),
+        )
+        .await;
+        assert_eq!(c, StatusCode::CREATED);
+        let (_, h3, b3) = call(&rb, "GET", "/v1/bundle", Some(&secret), None).await;
+        assert_ne!(b3, b1);
+        let (_, h4, b4) = call(&ra, "GET", "/v1/bundle", Some(&secret), None).await;
+        assert_eq!(b3, b4);
+        assert_eq!(h3["etag"], h4["etag"]);
+        // unchanged inputs: no new version, stable ETag
+        let (_, h5, _) = call(&rb, "GET", "/v1/bundle", Some(&secret), None).await;
+        assert_eq!(h3["etag"], h5["etag"]);
     }
 }
