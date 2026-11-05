@@ -9,6 +9,7 @@ license.workspace = true
 hygeia-core.workspace = true
 hygeia-api.workspace = true
 hygeia-dns.workspace = true
+hygeia-store.workspace = true
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true

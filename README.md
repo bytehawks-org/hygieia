@@ -28,8 +28,8 @@ flowchart TD
 |---|---|
 | `hygeia-core` | Done: trie matcher, hosts/domains/ABP(domain-level) parsers, policy, cosmetic model, signed bundle. Tested; builds for wasm32 |
 | `hygeia-audit` | Done: hash chain, verify, CEF. Missing: syslog/OTLP sinks, external head anchoring |
-| `hygeia-store` | In-memory store + PostgreSQL schema with RLS (`migrations/`). Missing: sqlx implementation |
-| `hygeia-api` | Enroll, bundle (ETag/304), rules CRUD, simulate (dry-run), audit + verify. Static admin token. Missing: OIDC/RBAC, OpenAPI (utoipa), gRPC, list downloader/scheduler, groups/time windows, regex rules |
+| `hygeia-store` | PostgreSQL (sqlx) is the production store: RLS tenant isolation, per-tenant audit chain, composite FKs. RBAC model (roles/permissions, `users`, `role_bindings`, `api_tokens` tables). In-memory store for tests. Missing: RBAC enforcement in the API (needs OIDC), list catalogue/subscription queries, sqlx offline cache |
+| `hygeia-api` | Enroll, bundle (ETag/304), rules CRUD, simulate (dry-run), audit + verify. Static admin token. Missing: OIDC + RBAC wiring, OpenAPI (utoipa), gRPC, list downloader/scheduler, groups/time windows, regex rules |
 | `hygeia-dns` | UDP server, block via NXDOMAIN/null IP, plain UDP upstream. Missing: TCP, DoT/DoH/DoQ, DoT upstream, tenant resolution, query log, metrics |
 | `hygeia-proxy` | Skeleton (CONNECT host decision) |
 | `hygeia-blocker` | Skeleton (URL host check) |
@@ -53,6 +53,17 @@ upstream = ["192.168.1.1:53"]
 block_mode = "nxdomain"   # or "null_ip"
 ```
 
+Persistence (PostgreSQL 14+; without it the store is in-memory and non-persistent):
+
+```bash
+export HYGEIA_DATABASE_URL=postgres://hygeia_app:***@db/hygeia   # runtime role: non-owner, subject to RLS
+export HYGEIA_MIGRATE_URL=postgres://hygeia_owner:***@db/hygeia  # schema owner: runs migrations at startup
+```
+
+Create the `hygeia_app` role **before** the first migration (grants are applied only if it exists). Tenant isolation: every tenant-scoped query runs in a transaction with `set_config('app.tenant', ..., true)`; RLS policies hide all other rows, and if the setting is missing no rows are visible. Device auth and enrollment happen before the tenant is known and go through `SECURITY DEFINER` functions. `audit_events` is append-only (trigger, also against the owner).
+
+Known limitation: the bundle cache is per process, so with several API replicas each compiles its own bundle (different version/ETag). Persisting compiled bundles is on the roadmap.
+
 Set `HYGEIA_SIGNING_KEY` (64 hex chars) for a stable bundle key; otherwise an ephemeral one is generated at start.
 
 ```bash
@@ -64,6 +75,6 @@ dig @127.0.0.1 -p 5353 x.ads.example.com   # NXDOMAIN after the next bundle refr
 ## Develop
 
 ```bash
-cargo test --workspace
+cargo test --workspace   # Postgres tests run if HYGEIA_TEST_PG_ADMIN and HYGEIA_TEST_PG_APP are set (see crates/hygeia-store/tests/pg.rs)
 cargo check -p hygeia-core --target wasm32-unknown-unknown
 ```

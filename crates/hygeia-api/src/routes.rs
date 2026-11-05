@@ -7,7 +7,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use hygeia_core::{Ruleset, RulesetData, SignedBundle};
-use hygeia_store::{Rule, RuleAction, hash_secret};
+use hygeia_store::{Rule, RuleAction, StoreError, hash_secret};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -66,6 +66,18 @@ async fn pubkey(State(st): S) -> String {
         .collect()
 }
 
+/// Map store failures to HTTP without leaking backend details to clients.
+fn store_err(e: StoreError) -> Response {
+    match e {
+        StoreError::NotFound => StatusCode::NOT_FOUND.into_response(),
+        StoreError::InvalidToken => StatusCode::UNAUTHORIZED.into_response(),
+        other => {
+            tracing::error!(error = %other, "store error");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct EnrollReq {
     token: String,
@@ -74,7 +86,7 @@ struct EnrollReq {
 }
 
 async fn enroll(State(st): S, Json(req): Json<EnrollReq>) -> Response {
-    match st.store.enroll(&req.token, &req.device_info, now()) {
+    match st.store.enroll(&req.token, &req.device_info, now()).await {
         Ok((dev, secret)) => {
             st.record(
                 &dev.tenant_id,
@@ -82,19 +94,31 @@ async fn enroll(State(st): S, Json(req): Json<EnrollReq>) -> Response {
                 "device.enroll",
                 &dev.id,
                 Some(json!({"info": dev.info})),
-            );
+            )
+            .await;
             Json(json!({"device_id": dev.id, "device_secret": secret})).into_response()
         }
         // Single generic error: do not reveal why a token was rejected.
-        Err(_) => StatusCode::UNAUTHORIZED.into_response(),
+        Err(StoreError::InvalidToken | StoreError::NotFound) => {
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+        Err(e) => store_err(e),
     }
 }
 
 async fn bundle(State(st): S, headers: HeaderMap) -> Response {
-    let Some(dev) = bearer(&headers).and_then(|s| st.store.authenticate_device(s, now())) else {
+    let Some(secret) = bearer(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    let b: Arc<SignedBundle> = st.bundle_for(&dev.tenant_id, &dev.group_id);
+    let dev = match st.store.authenticate_device(secret, now()).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
+        Err(e) => return store_err(e),
+    };
+    let b: Arc<SignedBundle> = match st.bundle_for(&dev.tenant_id, &dev.group_id).await {
+        Ok(b) => b,
+        Err(e) => return store_err(e),
+    };
     let etag = b.etag();
     let not_modified = headers
         .get(header::IF_NONE_MATCH)
@@ -139,18 +163,25 @@ fn d_ttl() -> i64 {
 
 async fn create_token(State(st): S, h: HeaderMap, Json(r): Json<NewToken>) -> Response {
     admin!(st, h);
-    let (t, secret) =
-        st.store
-            .create_enrollment_token(&r.tenant_id, &r.group_id, r.ttl_secs, r.max_uses, now());
-    // The secret is deliberately NOT in the audit diff.
-    st.record(
-        &r.tenant_id,
-        "admin",
-        "token.create",
-        &t.id,
-        Some(json!({"group": r.group_id, "expires_at": t.expires_at, "max_uses": r.max_uses})),
-    );
-    Json(json!({"id": t.id, "token": secret, "expires_at": t.expires_at})).into_response()
+    match st
+        .store
+        .create_enrollment_token(&r.tenant_id, &r.group_id, r.ttl_secs, r.max_uses, now())
+        .await
+    {
+        Ok((t, secret)) => {
+            // The secret is deliberately NOT in the audit diff.
+            st.record(
+                &r.tenant_id,
+                "admin",
+                "token.create",
+                &t.id,
+                Some(json!({"group": r.group_id, "expires_at": t.expires_at, "max_uses": r.max_uses})),
+            )
+            .await;
+            Json(json!({"id": t.id, "token": secret, "expires_at": t.expires_at})).into_response()
+        }
+        Err(e) => store_err(e),
+    }
 }
 
 #[derive(Deserialize)]
@@ -161,7 +192,10 @@ struct TenantQ {
 
 async fn list_devices(State(st): S, h: HeaderMap, Query(q): Query<TenantQ>) -> Response {
     admin!(st, h);
-    Json(st.store.list_devices(&q.tenant_id)).into_response()
+    match st.store.list_devices(&q.tenant_id).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => store_err(e),
+    }
 }
 
 async fn revoke_device(
@@ -171,18 +205,22 @@ async fn revoke_device(
     Query(q): Query<TenantQ>,
 ) -> Response {
     admin!(st, h);
-    match st.store.revoke_device(&id) {
+    match st.store.revoke_device(&q.tenant_id, &id).await {
         Ok(()) => {
-            st.record(&q.tenant_id, "admin", "device.revoke", &id, None);
+            st.record(&q.tenant_id, "admin", "device.revoke", &id, None)
+                .await;
             StatusCode::NO_CONTENT.into_response()
         }
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => store_err(e),
     }
 }
 
 async fn list_rules(State(st): S, h: HeaderMap, Query(q): Query<TenantQ>) -> Response {
     admin!(st, h);
-    Json(st.store.list_rules(&q.tenant_id)).into_response()
+    match st.store.list_rules(&q.tenant_id).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => store_err(e),
+    }
 }
 
 #[derive(Deserialize)]
@@ -201,23 +239,33 @@ async fn add_rule(State(st): S, h: HeaderMap, Json(r): Json<NewRule>) -> Respons
     if hygeia_core::normalize(&r.pattern).is_none() {
         return (StatusCode::UNPROCESSABLE_ENTITY, "invalid domain pattern").into_response();
     }
-    let rule = st.store.add_rule(Rule {
-        id: String::new(),
-        tenant_id: r.tenant_id.clone(),
-        group_id: r.group_id,
-        action: r.action,
-        pattern: r.pattern,
-        comment: r.comment,
-    });
-    st.invalidate();
-    st.record(
-        &r.tenant_id,
-        "admin",
-        "rule.create",
-        &rule.id,
-        Some(json!({"after": rule})),
-    );
-    (StatusCode::CREATED, Json(rule)).into_response()
+    let tenant = r.tenant_id.clone();
+    let res = st
+        .store
+        .add_rule(Rule {
+            id: String::new(),
+            tenant_id: r.tenant_id,
+            group_id: r.group_id,
+            action: r.action,
+            pattern: r.pattern,
+            comment: r.comment,
+        })
+        .await;
+    match res {
+        Ok(rule) => {
+            st.invalidate();
+            st.record(
+                &tenant,
+                "admin",
+                "rule.create",
+                &rule.id,
+                Some(json!({"after": rule})),
+            )
+            .await;
+            (StatusCode::CREATED, Json(rule)).into_response()
+        }
+        Err(e) => store_err(e),
+    }
 }
 
 async fn delete_rule(
@@ -227,7 +275,7 @@ async fn delete_rule(
     Query(q): Query<TenantQ>,
 ) -> Response {
     admin!(st, h);
-    match st.store.delete_rule(&q.tenant_id, &id) {
+    match st.store.delete_rule(&q.tenant_id, &id).await {
         Ok(rule) => {
             st.invalidate();
             st.record(
@@ -236,10 +284,11 @@ async fn delete_rule(
                 "rule.delete",
                 &id,
                 Some(json!({"before": rule})),
-            );
+            )
+            .await;
             StatusCode::NO_CONTENT.into_response()
         }
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => store_err(e),
     }
 }
 
@@ -270,7 +319,10 @@ struct SimResp {
 /// against the bundle plus uncommitted rules.
 async fn simulate(State(st): S, h: HeaderMap, Json(r): Json<SimReq>) -> Response {
     admin!(st, h);
-    let signed = st.bundle_for(&r.tenant_id, &r.group_id);
+    let signed = match st.bundle_for(&r.tenant_id, &r.group_id).await {
+        Ok(b) => b,
+        Err(e) => return store_err(e),
+    };
     let Ok(bundle) = SignedBundle::open(&signed.0, &st.signing_key.verifying_key()) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
@@ -292,22 +344,33 @@ async fn simulate(State(st): S, h: HeaderMap, Json(r): Json<SimReq>) -> Response
     .into_response()
 }
 
-async fn audit(State(st): S, h: HeaderMap) -> Response {
-    admin!(st, h);
-    Json(st.audit.lock().unwrap().events().to_vec()).into_response()
+#[derive(Deserialize)]
+struct AuditQ {
+    #[serde(default = "d_tenant")]
+    tenant_id: String,
+    #[serde(default = "d_limit")]
+    limit: u32,
+}
+fn d_limit() -> u32 {
+    200
 }
 
-async fn audit_verify(State(st): S, h: HeaderMap) -> Response {
+async fn audit(State(st): S, h: HeaderMap, Query(q): Query<AuditQ>) -> Response {
     admin!(st, h);
-    let log = st.audit.lock().unwrap();
-    match log.verify() {
-        Ok(()) => Json(json!({"ok": true, "head": log.head(), "events": log.events().len()}))
-            .into_response(),
-        Err(e) => (
-            StatusCode::CONFLICT,
-            Json(json!({"ok": false, "error": e.to_string()})),
-        )
-            .into_response(),
+    match st.store.list_audit(&q.tenant_id, q.limit.min(1000)).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => store_err(e),
+    }
+}
+
+async fn audit_verify(State(st): S, h: HeaderMap, Query(q): Query<TenantQ>) -> Response {
+    admin!(st, h);
+    match st.store.verify_audit(&q.tenant_id).await {
+        Ok(s) => Json(json!({"ok": true, "head": s.head, "events": s.events})).into_response(),
+        Err(StoreError::Chain(e)) => {
+            (StatusCode::CONFLICT, Json(json!({"ok": false, "error": e}))).into_response()
+        }
+        Err(e) => store_err(e),
     }
 }
 
@@ -322,6 +385,7 @@ mod tests {
 
     fn app() -> (Router, Arc<AppState>) {
         let st = Arc::new(AppState::new(
+            Arc::new(hygeia_store::MemoryStore::new()),
             SigningKey::from_bytes(&[1u8; 32]),
             "admin-secret",
         ));

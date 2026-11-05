@@ -8,6 +8,7 @@ use ed25519_dalek::SigningKey;
 use hygeia_api::{AppState, DEFAULT_GROUP, DEFAULT_TENANT};
 use hygeia_core::{Ruleset, SignedBundle};
 use hygeia_dns::{BlockMode, DnsConfig};
+use hygeia_store::{MemoryStore, PgStore, Store};
 
 fn rand_hex(n: usize) -> String {
     let mut b = vec![0u8; n];
@@ -51,7 +52,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let state = Arc::new(AppState::new(signing_key, &admin_token));
+    // HYGEIA_DATABASE_URL: runtime role (non-owner, subject to RLS).
+    // HYGEIA_MIGRATE_URL: schema owner; when set, migrations run at startup.
+    let store: Arc<dyn Store> = match std::env::var("HYGEIA_DATABASE_URL") {
+        Ok(url) => {
+            if let Ok(owner) = std::env::var("HYGEIA_MIGRATE_URL") {
+                PgStore::migrate(&owner).await?;
+                tracing::info!("migrations applied");
+            }
+            Arc::new(PgStore::connect(&url).await?)
+        }
+        Err(_) => {
+            tracing::warn!("HYGEIA_DATABASE_URL not set: using NON-PERSISTENT in-memory store");
+            Arc::new(MemoryStore::new())
+        }
+    };
+    store.bootstrap_default().await?;
+    let state = Arc::new(AppState::new(store, signing_key, &admin_token));
 
     // Data plane: DNS follows the control plane by pulling the signed bundle.
     if cfg.dns.enabled {
@@ -64,13 +81,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move {
             let mut current = 0u64;
             loop {
-                let b = st.bundle_for(DEFAULT_TENANT, DEFAULT_GROUP);
-                if let Ok(bundle) = SignedBundle::open(&b.0, &verifying)
-                    && bundle.meta.version > current
-                {
-                    current = bundle.meta.version;
-                    r2.store(Arc::new(Ruleset::from_data(&bundle.network)));
-                    tracing::info!(version = current, "dns ruleset updated");
+                match st.bundle_for(DEFAULT_TENANT, DEFAULT_GROUP).await {
+                    Ok(b) => {
+                        if let Ok(bundle) = SignedBundle::open(&b.0, &verifying)
+                            && bundle.meta.version != current
+                        {
+                            current = bundle.meta.version;
+                            r2.store(Arc::new(Ruleset::from_data(&bundle.network)));
+                            tracing::info!(version = current, "dns ruleset updated");
+                        }
+                    }
+                    Err(e) => tracing::error!(error = %e, "bundle refresh failed"),
                 }
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }

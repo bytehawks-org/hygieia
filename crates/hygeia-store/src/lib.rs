@@ -1,9 +1,18 @@
-//! Persistence for the control plane.
+//! Persistence for the control plane behind the async [`Store`] trait.
 //!
-//! [`MemoryStore`] is the reference implementation (tests, zero-config demo).
-//! The PostgreSQL/SQLite schema lives in `migrations/`; an sqlx-backed store
-//! implementing the same operations is the next step.
+//! * [`PgStore`] — PostgreSQL via sqlx (production). Schema in `migrations/`,
+//!   tenant isolation by row level security.
+//! * [`MemoryStore`] — reference implementation for tests and demos.
 
+#[doc(hidden)]
+pub mod conformance;
+pub mod pg;
+pub mod rbac;
+
+pub use pg::PgStore;
+
+use async_trait::async_trait;
+use hygeia_audit::{AuditLog, ChainError, Draft, Event};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -29,11 +38,26 @@ pub fn hash_secret(secret: &str) -> [u8; 32] {
     Sha256::digest(secret.as_bytes()).into()
 }
 
+/// Random UUID (v4 layout) in canonical dashed form.
 pub fn new_id() -> String {
-    let mut raw = [0u8; 16];
-    getrandom::fill(&mut raw).expect("OS randomness unavailable");
-    raw.iter().map(|b| format!("{b:02x}")).collect()
+    let mut r = [0u8; 16];
+    getrandom::fill(&mut r).expect("OS randomness unavailable");
+    r[6] = (r[6] & 0x0f) | 0x40;
+    r[8] = (r[8] & 0x3f) | 0x80;
+    let h: String = r.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    )
 }
+
+/// Fixed ids for the zero-config / single-org deployment.
+pub const DEFAULT_TENANT_ID: &str = "00000000-0000-0000-0000-000000000001";
+pub const DEFAULT_GROUP_ID: &str = "00000000-0000-0000-0000-000000000002";
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum StoreError {
@@ -41,6 +65,62 @@ pub enum StoreError {
     InvalidToken,
     #[error("not found")]
     NotFound,
+    #[error("audit chain broken: {0}")]
+    Chain(String),
+    #[error("backend error: {0}")]
+    Backend(String),
+}
+
+impl From<ChainError> for StoreError {
+    fn from(e: ChainError) -> Self {
+        StoreError::Chain(e.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditStatus {
+    pub events: u64,
+    pub head: String,
+}
+
+pub type Result<T> = std::result::Result<T, StoreError>;
+
+/// Every operation that touches tenant data takes the tenant explicitly;
+/// implementations must never let one tenant read or modify another's rows.
+#[async_trait]
+pub trait Store: Send + Sync {
+    /// Ensure the default tenant + group exist (zero-config / single-org).
+    async fn bootstrap_default(&self) -> Result<()>;
+
+    async fn create_enrollment_token(
+        &self,
+        tenant_id: &str,
+        group_id: &str,
+        ttl_secs: i64,
+        max_uses: Option<u32>,
+        now: i64,
+    ) -> Result<(EnrollmentToken, String)>;
+    async fn revoke_enrollment_token(&self, tenant_id: &str, id: &str) -> Result<()>;
+    /// Exchange an enrollment token for a device credential (atomic use count).
+    async fn enroll(&self, secret: &str, info: &str, now: i64) -> Result<(Device, String)>;
+    /// Authenticate a device by credential; updates `last_seen`.
+    async fn authenticate_device(&self, secret: &str, now: i64) -> Result<Option<Device>>;
+    async fn revoke_device(&self, tenant_id: &str, id: &str) -> Result<()>;
+    async fn list_devices(&self, tenant_id: &str) -> Result<Vec<Device>>;
+
+    async fn add_rule(&self, rule: Rule) -> Result<Rule>;
+    async fn delete_rule(&self, tenant_id: &str, id: &str) -> Result<Rule>;
+    /// Tenant-wide plus group-specific rules.
+    async fn rules_for(&self, tenant_id: &str, group_id: &str) -> Result<Vec<Rule>>;
+    async fn list_rules(&self, tenant_id: &str) -> Result<Vec<Rule>>;
+
+    async fn next_bundle_version(&self, tenant_id: &str, group_id: &str) -> Result<u64>;
+
+    /// Append to the tenant's hash chain.
+    async fn append_audit(&self, draft: Draft) -> Result<()>;
+    /// Last `limit` events of the tenant, oldest first.
+    async fn list_audit(&self, tenant_id: &str, limit: u32) -> Result<Vec<Event>>;
+    async fn verify_audit(&self, tenant_id: &str) -> Result<AuditStatus>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +172,7 @@ struct State {
     devices: HashMap<String, Device>,
     rules: Vec<Rule>,
     bundle_version: HashMap<(String, String), u64>,
+    audit: HashMap<String, AuditLog>,
 }
 
 #[derive(Default)]
@@ -103,16 +184,22 @@ impl MemoryStore {
     pub fn new() -> Self {
         Self::default()
     }
+}
 
-    /// Returns the plaintext secret exactly once; only its hash is kept.
-    pub fn create_enrollment_token(
+#[async_trait]
+impl Store for MemoryStore {
+    async fn bootstrap_default(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn create_enrollment_token(
         &self,
         tenant_id: &str,
         group_id: &str,
         ttl_secs: i64,
         max_uses: Option<u32>,
         now: i64,
-    ) -> (EnrollmentToken, String) {
+    ) -> Result<(EnrollmentToken, String)> {
         let (secret, hash) = new_secret(PREFIX_ENROLL);
         let t = EnrollmentToken {
             id: new_id(),
@@ -129,22 +216,21 @@ impl MemoryStore {
             .unwrap()
             .tokens
             .insert(t.id.clone(), t.clone());
-        (t, secret)
+        Ok((t, secret))
     }
 
-    pub fn revoke_enrollment_token(&self, id: &str) -> Result<(), StoreError> {
+    async fn revoke_enrollment_token(&self, tenant_id: &str, id: &str) -> Result<()> {
         let mut s = self.s.lock().unwrap();
-        s.tokens.get_mut(id).ok_or(StoreError::NotFound)?.revoked = true;
+        let t = s
+            .tokens
+            .get_mut(id)
+            .filter(|t| t.tenant_id == tenant_id)
+            .ok_or(StoreError::NotFound)?;
+        t.revoked = true;
         Ok(())
     }
 
-    /// Exchange an enrollment token for a device credential (atomic use count).
-    pub fn enroll(
-        &self,
-        secret: &str,
-        info: &str,
-        now: i64,
-    ) -> Result<(Device, String), StoreError> {
+    async fn enroll(&self, secret: &str, info: &str, now: i64) -> Result<(Device, String)> {
         if !secret.starts_with(PREFIX_ENROLL) {
             return Err(StoreError::InvalidToken);
         }
@@ -173,43 +259,48 @@ impl MemoryStore {
         Ok((d, dev_secret))
     }
 
-    /// Authenticate a device by credential; updates `last_seen`.
-    pub fn authenticate_device(&self, secret: &str, now: i64) -> Option<Device> {
+    async fn authenticate_device(&self, secret: &str, now: i64) -> Result<Option<Device>> {
         if !secret.starts_with(PREFIX_DEVICE) {
-            return None;
+            return Ok(None);
         }
         let h = hash_secret(secret);
         let mut s = self.s.lock().unwrap();
-        let d = s
-            .devices
+        Ok(s.devices
             .values_mut()
-            .find(|d| d.secret_hash == h && !d.revoked)?;
-        d.last_seen = now;
-        Some(d.clone())
+            .find(|d| d.secret_hash == h && !d.revoked)
+            .map(|d| {
+                d.last_seen = now;
+                d.clone()
+            }))
     }
 
-    pub fn revoke_device(&self, id: &str) -> Result<(), StoreError> {
+    async fn revoke_device(&self, tenant_id: &str, id: &str) -> Result<()> {
         let mut s = self.s.lock().unwrap();
-        s.devices.get_mut(id).ok_or(StoreError::NotFound)?.revoked = true;
+        let d = s
+            .devices
+            .get_mut(id)
+            .filter(|d| d.tenant_id == tenant_id)
+            .ok_or(StoreError::NotFound)?;
+        d.revoked = true;
         Ok(())
     }
 
-    pub fn list_devices(&self, tenant_id: &str) -> Vec<Device> {
+    async fn list_devices(&self, tenant_id: &str) -> Result<Vec<Device>> {
         let s = self.s.lock().unwrap();
-        s.devices
+        Ok(s.devices
             .values()
             .filter(|d| d.tenant_id == tenant_id)
             .cloned()
-            .collect()
+            .collect())
     }
 
-    pub fn add_rule(&self, mut r: Rule) -> Rule {
+    async fn add_rule(&self, mut r: Rule) -> Result<Rule> {
         r.id = new_id();
         self.s.lock().unwrap().rules.push(r.clone());
-        r
+        Ok(r)
     }
 
-    pub fn delete_rule(&self, tenant_id: &str, id: &str) -> Result<Rule, StoreError> {
+    async fn delete_rule(&self, tenant_id: &str, id: &str) -> Result<Rule> {
         let mut s = self.s.lock().unwrap();
         let i = s
             .rules
@@ -219,35 +310,70 @@ impl MemoryStore {
         Ok(s.rules.remove(i))
     }
 
-    /// Rules effective for a group: tenant-wide plus group-specific.
-    pub fn rules_for(&self, tenant_id: &str, group_id: &str) -> Vec<Rule> {
+    async fn rules_for(&self, tenant_id: &str, group_id: &str) -> Result<Vec<Rule>> {
         let s = self.s.lock().unwrap();
-        s.rules
+        Ok(s.rules
             .iter()
             .filter(|r| {
                 r.tenant_id == tenant_id && r.group_id.as_deref().is_none_or(|g| g == group_id)
             })
             .cloned()
-            .collect()
+            .collect())
     }
 
-    pub fn list_rules(&self, tenant_id: &str) -> Vec<Rule> {
+    async fn list_rules(&self, tenant_id: &str) -> Result<Vec<Rule>> {
         let s = self.s.lock().unwrap();
-        s.rules
+        Ok(s.rules
             .iter()
             .filter(|r| r.tenant_id == tenant_id)
             .cloned()
-            .collect()
+            .collect())
     }
 
-    pub fn next_bundle_version(&self, tenant_id: &str, group_id: &str) -> u64 {
+    async fn next_bundle_version(&self, tenant_id: &str, group_id: &str) -> Result<u64> {
         let mut s = self.s.lock().unwrap();
         let v = s
             .bundle_version
             .entry((tenant_id.into(), group_id.into()))
             .or_insert(0);
         *v += 1;
-        *v
+        Ok(*v)
+    }
+
+    async fn append_audit(&self, draft: Draft) -> Result<()> {
+        let mut s = self.s.lock().unwrap();
+        s.audit
+            .entry(draft.tenant_id.clone())
+            .or_default()
+            .append(draft);
+        Ok(())
+    }
+
+    async fn list_audit(&self, tenant_id: &str, limit: u32) -> Result<Vec<Event>> {
+        let s = self.s.lock().unwrap();
+        let ev = s
+            .audit
+            .get(tenant_id)
+            .map(|l| l.events())
+            .unwrap_or_default();
+        Ok(ev[ev.len().saturating_sub(limit as usize)..].to_vec())
+    }
+
+    async fn verify_audit(&self, tenant_id: &str) -> Result<AuditStatus> {
+        let s = self.s.lock().unwrap();
+        match s.audit.get(tenant_id) {
+            None => Ok(AuditStatus {
+                events: 0,
+                head: hygeia_audit::GENESIS.into(),
+            }),
+            Some(l) => {
+                l.verify()?;
+                Ok(AuditStatus {
+                    events: l.events().len() as u64,
+                    head: l.head().into(),
+                })
+            }
+        }
     }
 }
 
@@ -255,48 +381,9 @@ impl MemoryStore {
 mod tests {
     use super::*;
 
-    #[test]
-    fn enroll_flow() {
+    #[tokio::test]
+    async fn memory_store_conformance() {
         let st = MemoryStore::new();
-        let (_, secret) = st.create_enrollment_token("t", "g", 60, Some(1), 100);
-        assert!(secret.starts_with(PREFIX_ENROLL));
-        let (dev, dsecret) = st.enroll(&secret, "chrome", 110).unwrap();
-        assert_eq!((dev.tenant_id.as_str(), dev.group_id.as_str()), ("t", "g"));
-        // max_uses = 1
-        assert_eq!(st.enroll(&secret, "x", 111), Err(StoreError::InvalidToken));
-        assert!(st.authenticate_device(&dsecret, 120).is_some());
-        st.revoke_device(&dev.id).unwrap();
-        assert!(st.authenticate_device(&dsecret, 121).is_none());
-        // enrollment secrets are not device credentials
-        assert!(st.authenticate_device(&secret, 0).is_none());
-    }
-
-    #[test]
-    fn token_expiry_and_revoke() {
-        let st = MemoryStore::new();
-        let (_, s1) = st.create_enrollment_token("t", "g", 10, None, 0);
-        assert!(st.enroll(&s1, "", 10).is_err());
-        let (t2, s2) = st.create_enrollment_token("t", "g", 10, None, 0);
-        st.revoke_enrollment_token(&t2.id).unwrap();
-        assert!(st.enroll(&s2, "", 1).is_err());
-    }
-
-    #[test]
-    fn rules_scoped_by_tenant_and_group() {
-        let st = MemoryStore::new();
-        let mk = |t: &str, g: Option<&str>| Rule {
-            id: String::new(),
-            tenant_id: t.into(),
-            group_id: g.map(Into::into),
-            action: RuleAction::Block,
-            pattern: "a.test".into(),
-            comment: String::new(),
-        };
-        st.add_rule(mk("t1", None));
-        st.add_rule(mk("t1", Some("g1")));
-        st.add_rule(mk("t1", Some("g2")));
-        st.add_rule(mk("t2", None));
-        assert_eq!(st.rules_for("t1", "g1").len(), 2);
-        assert_eq!(st.list_rules("t2").len(), 1);
+        crate::conformance::run(&st, ("t1", "g1", "g1b"), ("t2", "g2")).await;
     }
 }

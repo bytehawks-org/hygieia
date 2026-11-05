@@ -58,6 +58,18 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Build the next event of a chain. Used by persistent stores that keep the
+/// chain head themselves (one chain per tenant).
+pub fn seal(seq: u64, prev_hash: &str, draft: Draft) -> Event {
+    let hash = compute_hash(seq, prev_hash, &draft);
+    Event {
+        seq,
+        draft,
+        prev_hash: prev_hash.to_string(),
+        hash,
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct AuditLog {
     events: Vec<Event>,

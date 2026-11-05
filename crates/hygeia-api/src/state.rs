@@ -3,15 +3,14 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
-use hygeia_audit::{AuditLog, Draft};
+use hygeia_audit::Draft;
 use hygeia_core::SignedBundle;
-use hygeia_store::MemoryStore;
+use hygeia_store::{Result as StoreResult, Store};
 use serde_json::Value;
 
 use crate::build::{ListInput, compile};
 
-pub const DEFAULT_TENANT: &str = "default";
-pub const DEFAULT_GROUP: &str = "default";
+pub use hygeia_store::{DEFAULT_GROUP_ID as DEFAULT_GROUP, DEFAULT_TENANT_ID as DEFAULT_TENANT};
 
 pub fn now() -> i64 {
     SystemTime::now()
@@ -20,8 +19,7 @@ pub fn now() -> i64 {
 }
 
 pub struct AppState {
-    pub store: MemoryStore,
-    pub audit: Mutex<AuditLog>,
+    pub store: Arc<dyn Store>,
     pub signing_key: SigningKey,
     pub admin_token_hash: [u8; 32],
     lists: RwLock<Vec<ListInput>>,
@@ -29,10 +27,9 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(signing_key: SigningKey, admin_token: &str) -> Self {
+    pub fn new(store: Arc<dyn Store>, signing_key: SigningKey, admin_token: &str) -> Self {
         Self {
-            store: MemoryStore::new(),
-            audit: Mutex::new(AuditLog::new()),
+            store,
             signing_key,
             admin_token_hash: hygeia_store::hash_secret(admin_token),
             lists: RwLock::new(Vec::new()),
@@ -50,15 +47,14 @@ impl AppState {
         self.cache.lock().unwrap().clear();
     }
 
-    pub fn bundle_for(&self, tenant: &str, group: &str) -> Arc<SignedBundle> {
+    pub async fn bundle_for(&self, tenant: &str, group: &str) -> StoreResult<Arc<SignedBundle>> {
         let key = (tenant.to_string(), group.to_string());
-        let mut cache = self.cache.lock().unwrap();
-        if let Some(b) = cache.get(&key) {
-            return b.clone();
+        if let Some(b) = self.cache.lock().unwrap().get(&key) {
+            return Ok(b.clone());
         }
-        let version = self.store.next_bundle_version(tenant, group);
-        let rules = self.store.rules_for(tenant, group);
-        let lists = self.lists.read().unwrap();
+        let version = self.store.next_bundle_version(tenant, group).await?;
+        let rules = self.store.rules_for(tenant, group).await?;
+        let lists = self.lists.read().unwrap().clone();
         let b = Arc::new(compile(
             tenant,
             group,
@@ -68,19 +64,21 @@ impl AppState {
             &lists,
             &self.signing_key,
         ));
-        cache.insert(key, b.clone());
-        drop(cache);
+        self.cache.lock().unwrap().insert(key, b.clone());
         self.record(
             tenant,
             "system",
             "bundle.compile",
             &format!("{group}@v{version}"),
             None,
-        );
-        b
+        )
+        .await;
+        Ok(b)
     }
 
-    pub fn record(
+    /// Audit failures are logged loudly but do not abort the operation here;
+    /// a deployment that requires fail-closed auditing should change this.
+    pub async fn record(
         &self,
         tenant: &str,
         actor: &str,
@@ -88,13 +86,16 @@ impl AppState {
         target: &str,
         diff: Option<Value>,
     ) {
-        self.audit.lock().unwrap().append(Draft {
+        let draft = Draft {
             ts: now(),
             tenant_id: tenant.into(),
             actor: actor.into(),
             action: action.into(),
             target: target.into(),
             diff,
-        });
+        };
+        if let Err(e) = self.store.append_audit(draft).await {
+            tracing::error!(error = %e, action, "audit append failed");
+        }
     }
 }

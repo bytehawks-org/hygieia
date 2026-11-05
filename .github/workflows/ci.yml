@@ -3,6 +3,17 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      HYGEIA_TEST_PG_ADMIN: postgres://hygeia_owner:owner@localhost:5432
+      HYGEIA_TEST_PG_APP: postgres://hygeia_app:app@localhost:5432
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -10,6 +21,12 @@ jobs:
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - name: Create database roles
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -c "create role hygeia_owner login createdb password 'owner'"
+          psql -h localhost -U postgres -c "create role hygeia_app login password 'app' nosuperuser nobypassrls"
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
