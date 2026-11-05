@@ -3,22 +3,15 @@ mod config;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
 use ed25519_dalek::SigningKey;
 use hygeia_api::{
     AppState, AuthConfig, BreakGlass, DEFAULT_GROUP, DEFAULT_TENANT, OidcConfig, OidcPublic,
     OidcVerifier, PublicConfig,
 };
-use hygeia_core::{Ruleset, SignedBundle};
-use hygeia_dns::{BlockMode, DnsConfig};
 use hygeia_lists::{HttpFetcher, Manager};
 use hygeia_store::{MemoryStore, PgStore, Store};
 
-fn rand_hex(n: usize) -> String {
-    let mut b = vec![0u8; n];
-    getrandom::fill(&mut b).expect("OS randomness unavailable");
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
+use hygeia_runtime::rand_hex;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -74,53 +67,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Data plane: DNS follows the control plane by pulling the signed bundle.
     if cfg.dns.enabled {
-        let verifying = state.signing_key.verifying_key();
-        let rules = Arc::new(ArcSwap::from_pointee(Ruleset::from_data(
-            &Default::default(),
-        )));
-        let st = state.clone();
-        let r2 = rules.clone();
-        tokio::spawn(async move {
-            let mut current = 0u64;
-            loop {
-                match st.bundle_for(DEFAULT_TENANT, DEFAULT_GROUP).await {
-                    Ok(b) => {
-                        if let Ok(bundle) = SignedBundle::open(&b.0, &verifying)
-                            && bundle.meta.version != current
-                        {
-                            current = bundle.meta.version;
-                            r2.store(Arc::new(Ruleset::from_data(&bundle.network)));
-                            tracing::info!(version = current, "dns ruleset updated");
-                        }
-                    }
-                    Err(e) => tracing::error!(error = %e, "bundle refresh failed"),
-                }
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        });
-
-        let upstream = cfg
-            .dns
-            .upstream
-            .first()
-            .ok_or("dns.upstream is empty")?
-            .parse()?;
-        let mode = match cfg.dns.block_mode.as_str() {
-            "null_ip" => BlockMode::NullIp,
-            _ => BlockMode::NxDomain,
-        };
-        let sock = tokio::net::UdpSocket::bind(&cfg.dns.listen).await?;
-        tracing::info!(listen = %cfg.dns.listen, "dns listening (udp)");
-        let dns_cfg = Arc::new(DnsConfig {
-            upstream,
-            block_mode: mode,
-            upstream_timeout: Duration::from_secs(3),
-        });
-        tokio::spawn(async move {
-            if let Err(e) = hygeia_dns::serve_udp(sock, rules, dns_cfg).await {
-                tracing::error!(error = %e, "dns server stopped");
-            }
-        });
+        let rules =
+            hygeia_runtime::spawn_dns_follower(state.clone(), DEFAULT_TENANT, DEFAULT_GROUP);
+        let upstream = cfg.dns.upstream.first().ok_or("dns.upstream is empty")?;
+        hygeia_runtime::spawn_dns_server(&cfg.dns.listen, upstream, &cfg.dns.block_mode, rules)
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
     if cfg.lists.enabled {
@@ -137,27 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             insecure,
         );
         let interval = Duration::from_secs(cfg.lists.refresh_hours.max(1) * 3600);
-        let st = state.clone();
-        tokio::spawn(async move {
-            let mut first = true;
-            loop {
-                let r = manager.refresh().await;
-                let status = serde_json::to_value(&r.status).unwrap_or_default();
-                if r.changed || first {
-                    match st.set_lists(r.sources, status).await {
-                        Ok(()) => tracing::info!(sources = r.status.len(), "lists updated"),
-                        Err(e) => tracing::error!(error = %e, "could not install refreshed lists"),
-                    }
-                } else {
-                    st.set_list_status(status);
-                }
-                first = false;
-                tokio::select! {
-                    _ = tokio::time::sleep(interval) => {}
-                    _ = st.refresh_requested.notified() => tracing::info!("list refresh requested"),
-                }
-            }
-        });
+        hygeia_runtime::spawn_list_refresher(state.clone(), manager, interval);
     }
 
     let listener = tokio::net::TcpListener::bind(&cfg.api.listen).await?;
@@ -174,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = match web_dir {
         Some(dir) => {
             let mut connect: Vec<String> = cfg.auth.oidc.ui_connect_src.clone();
-            if let Some(origin) = origin_of(&cfg.auth.oidc.issuer) {
+            if let Some(origin) = hygeia_runtime::origin_of(&cfg.auth.oidc.issuer) {
                 connect.push(origin);
             }
             let ui = hygeia_api::ui::Ui::load(&dir, &connect)?;
@@ -277,6 +209,7 @@ async fn build_auth(
         );
     }
     let public = PublicConfig {
+        mode: "server".into(),
         environment: format!("{env:?}").to_lowercase(),
         break_glass: break_glass.is_some(),
         oidc: (oidc.is_some() && !o.client_id.is_empty()).then(|| OidcPublic {
@@ -285,11 +218,12 @@ async fn build_auth(
             scope: "openid email profile".into(),
         }),
     };
-    Ok((AuthConfig { break_glass, oidc }, public))
-}
-
-/// `https://host:port/path` -> `https://host:port`
-fn origin_of(url: &str) -> Option<String> {
-    let (scheme, rest) = url.split_once("://")?;
-    Some(format!("{scheme}://{}", rest.split('/').next()?))
+    Ok((
+        AuthConfig {
+            local_owner: None,
+            break_glass,
+            oidc,
+        },
+        public,
+    ))
 }

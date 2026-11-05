@@ -80,6 +80,13 @@ impl AuditLog {
         Self::default()
     }
 
+    /// Rebuild a log from persisted events, refusing a chain that does not verify
+    /// (a tampered or corrupted snapshot must not be silently accepted).
+    pub fn from_events(events: Vec<Event>) -> Result<Self, ChainError> {
+        verify(&events)?;
+        Ok(Self { events })
+    }
+
     pub fn head(&self) -> &str {
         self.events.last().map_or(GENESIS, |e| e.hash.as_str())
     }

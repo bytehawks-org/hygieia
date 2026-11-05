@@ -76,6 +76,23 @@ jobs:
         run: |
           npm install --no-save playwright
           npx playwright install --with-deps chromium
-      - name: UI end-to-end
+      - run: cargo build -p hygeia-proxy
+      - name: UI end-to-end (server)
         working-directory: web
         run: node test/e2e.mjs
+      - name: UI end-to-end (standalone node)
+        working-directory: web
+        run: node test/e2e-node.mjs
+
+  windows:
+    # Unproven: first run will show whether the node builds and its tests pass on Windows.
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/setup-nasm@v1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p hygeia-proxy
+      - run: cargo test -p hygeia-proxy -p hygeia-store --lib
+      - run: cargo test -p hygeia-proxy --test node

@@ -14,6 +14,16 @@ export default function Login() {
 
   useEffect(() => { api.config().then(setCfg, setErr); }, []);
 
+  // `hygeia-proxy open` lands here with the credential in the URL fragment: it is never sent to a
+  // server and never logged. Use it once, then scrub it from the address bar and history.
+  useEffect(() => {
+    const m = /^#token=([A-Za-z0-9_\-.]+)$/.exec(window.location.hash);
+    if (!m?.[1]) return;
+    const t = m[1];
+    window.history.replaceState(null, '', window.location.pathname);
+    api.me(t).then(() => { saveSession({ token: t, kind: 'token' }); window.location.assign('/'); }, setErr);
+  }, []);
+
   const withToken = async (e: FormEvent) => {
     e.preventDefault(); setErr(null); setBusy(true);
     try {
@@ -35,7 +45,7 @@ export default function Login() {
       )}
       <form onSubmit={withToken} className="space-y-2 rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
         <label className="block text-sm font-medium" htmlFor="token">
-          API token {cfg?.break_glass && <Badge tone="amber">or break-glass</Badge>}
+          {cfg?.mode === 'standalone' ? 'Owner credential' : 'API token'} {cfg?.break_glass && <Badge tone="amber">or break-glass</Badge>}
         </label>
         <input id="token" type="password" autoComplete="off" required className="w-full font-mono" placeholder="hyg_api_…" value={token} onChange={(e) => setToken(e.target.value)} />
         <Button type="submit" variant="ghost" className="w-full" disabled={busy}>Sign in with token</Button>

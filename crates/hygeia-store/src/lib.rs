@@ -6,9 +6,11 @@
 
 #[doc(hidden)]
 pub mod conformance;
+pub mod file;
 pub mod pg;
 pub mod rbac;
 
+pub use file::FileStore;
 pub use pg::PgStore;
 
 use async_trait::async_trait;
@@ -299,25 +301,25 @@ pub struct Rule {
 }
 
 #[derive(Default)]
-struct State {
-    tokens: HashMap<String, EnrollmentToken>,
-    devices: HashMap<String, Device>,
-    rules: Vec<Rule>,
-    bundle_version: HashMap<(String, String), u64>,
-    audit: HashMap<String, AuditLog>,
-    tenants: Vec<Tenant>,
-    groups: Vec<Group>,
-    users: Vec<User>,
-    bindings: Vec<Binding>,
-    api_tokens: Vec<(ApiToken, [u8; 32])>,
-    catalog: Vec<CatalogSource>,
-    policies: HashMap<String, ListPolicy>,
-    subs: Vec<(String, Subscription)>,
+pub(crate) struct State {
+    pub(crate) tokens: HashMap<String, EnrollmentToken>,
+    pub(crate) devices: HashMap<String, Device>,
+    pub(crate) rules: Vec<Rule>,
+    pub(crate) bundle_version: HashMap<(String, String), u64>,
+    pub(crate) audit: HashMap<String, AuditLog>,
+    pub(crate) tenants: Vec<Tenant>,
+    pub(crate) groups: Vec<Group>,
+    pub(crate) users: Vec<User>,
+    pub(crate) bindings: Vec<Binding>,
+    pub(crate) api_tokens: Vec<(ApiToken, [u8; 32])>,
+    pub(crate) catalog: Vec<CatalogSource>,
+    pub(crate) policies: HashMap<String, ListPolicy>,
+    pub(crate) subs: Vec<(String, Subscription)>,
 }
 
 #[derive(Default)]
 pub struct MemoryStore {
-    s: Mutex<State>,
+    pub(crate) s: Mutex<State>,
 }
 
 impl MemoryStore {

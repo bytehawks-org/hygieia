@@ -4,11 +4,14 @@ export type Role = 'owner' | 'admin' | 'editor' | 'viewer' | 'auditor';
 export interface Binding { id: string; user_id: string; tenant_id: string | null; role: Role }
 
 export type Principal =
+  | { kind: 'local_owner' }
   | { kind: 'break_glass' }
   | { kind: 'api_token'; id: string; tenant_id: string; role: Role }
   | { kind: 'user'; id: string; issuer: string; subject: string; email: string | null; bindings: Binding[] };
 
 export interface PublicConfig {
+  /** 'server' (central) or 'standalone' (single-machine node) */
+  mode: 'server' | 'standalone' | string;
   environment: 'production' | 'staging' | 'dev' | string;
   break_glass: boolean;
   oidc: { issuer: string; client_id: string; scope: string } | null;

@@ -21,6 +21,8 @@ type S = State<Arc<AppState>>;
 /// Non-secret deployment info for the UI (login screen, environment banner).
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PublicConfig {
+    /// `server` (central) or `standalone` (single-machine node)
+    pub mode: String,
     /// `production` | `staging` | `dev`
     pub environment: String,
     pub break_glass: bool,
@@ -906,6 +908,7 @@ mod tests {
             AuthConfig {
                 break_glass: Some(BreakGlass::new(ADMIN, None).unwrap()),
                 oidc,
+                ..Default::default()
             },
         ))
     }
@@ -1076,6 +1079,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_owner_is_owner_without_break_glass_noise() {
+        let local = "local-owner-secret-0123456789-abcdefghij";
+        let st = Arc::new(AppState::new(
+            Arc::new(MemoryStore::new()),
+            SigningKey::from_bytes(&[1u8; 32]),
+            AuthConfig {
+                local_owner: Some(crate::auth::LocalOwner::new(local).unwrap()),
+                ..Default::default()
+            },
+        ));
+        st.store.bootstrap_default().await.unwrap();
+        let app = router(st);
+        assert!(crate::auth::LocalOwner::new("short").is_err());
+        assert_eq!(
+            call(
+                &app,
+                "GET",
+                "/v1/me",
+                Some("nope-nope-nope-nope-nope-nope-nope-no"),
+                None
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (s, _, b) = call(&app, "GET", "/v1/me", Some(local), None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(j(&b)["kind"], "local_owner");
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/v1/admin/rules",
+                Some(local),
+                Some(json!({"action": "block", "pattern": "a.test"}))
+            )
+            .await
+            .0,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/v1/admin/tenants",
+                Some(local),
+                Some(json!({"slug": "x", "name": "X"}))
+            )
+            .await
+            .0,
+            StatusCode::CREATED
+        );
+        let (_, _, b) = call(&app, "GET", "/v1/admin/audit", Some(local), None).await;
+        let text = String::from_utf8(b).unwrap();
+        assert!(text.contains(r#""actor":"local-owner""#) && !text.contains("auth.break_glass"));
+    }
+
+    #[tokio::test]
     async fn expired_break_glass_is_rejected() {
         let st = Arc::new(AppState::new(
             Arc::new(MemoryStore::new()),
@@ -1083,6 +1144,7 @@ mod tests {
             AuthConfig {
                 break_glass: Some(BreakGlass::new(ADMIN, Some(Duration::ZERO)).unwrap()),
                 oidc: None,
+                ..Default::default()
             },
         ));
         let app = router(st);

@@ -11,7 +11,7 @@ mod routes;
 mod state;
 pub mod ui;
 
-pub use auth::{AuthConfig, BreakGlass, Principal};
+pub use auth::{AuthConfig, BreakGlass, LocalOwner, Principal};
 pub use oidc::{OidcConfig, OidcVerifier};
 pub use routes::{OidcPublic, PublicConfig, router, router_with_ui};
 pub use state::{AppState, DEFAULT_GROUP, DEFAULT_TENANT, now};

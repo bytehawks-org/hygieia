@@ -11,7 +11,7 @@ export default function Overview() {
   const lists = useAsync(() => api.lists(), []);
   const audit = useAsync(() => api.verifyAudit(tenant), [tenant]);
 
-  const roles = me.kind === 'break_glass' ? ['owner (break-glass)']
+  const roles = me.kind === 'local_owner' ? ['owner (this machine)'] : me.kind === 'break_glass' ? ['owner (break-glass)']
     : me.kind === 'api_token' ? [me.role]
     : me.bindings.map((b) => `${b.role}${b.tenant_id ? '' : ' (platform)'}`);
   const failing = (lists.data ?? []).filter((l) => l.last_error);

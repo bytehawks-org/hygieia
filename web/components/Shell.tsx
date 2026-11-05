@@ -32,14 +32,14 @@ function accessibleTenantIds(me: Principal): string[] {
   return [];
 }
 
-const NAV: { href: string; label: string; platformOnly?: boolean }[] = [
+const NAV: { href: string; label: string; platformOnly?: boolean; serverOnly?: boolean }[] = [
   { href: '/', label: 'Overview' },
   { href: '/rules/', label: 'Rules' },
   { href: '/devices/', label: 'Devices' },
   { href: '/lists/', label: 'Filter lists' },
   { href: '/audit/', label: 'Audit' },
   { href: '/access/', label: 'Access' },
-  { href: '/tenants/', label: 'Tenants', platformOnly: true },
+  { href: '/tenants/', label: 'Tenants', platformOnly: true, serverOnly: true },
 ];
 
 export function Shell({ children }: { children: ReactNode }) {
@@ -52,7 +52,7 @@ export function Shell({ children }: { children: ReactNode }) {
     (async () => {
       try {
         const [config, me] = await Promise.all([api.config(), api.me()]);
-        const platform = me.kind === 'break_glass' || (me.kind === 'user' && me.bindings.some((b) => b.tenant_id === null && b.role === 'owner'));
+        const platform = me.kind === 'break_glass' || me.kind === 'local_owner' || (me.kind === 'user' && me.bindings.some((b) => b.tenant_id === null && b.role === 'owner'));
         let tenants: Tenant[] = [];
         if (platform) tenants = await api.tenants().catch(() => []);
         const ids = platform && tenants.length ? tenants.map((t) => t.id) : accessibleTenantIds(me);
@@ -66,7 +66,7 @@ export function Shell({ children }: { children: ReactNode }) {
 
   const ctx = useMemo<Ctx | null>(() => {
     if (!state) return null;
-    const platform = state.me.kind === 'break_glass' || (state.me.kind === 'user' && state.me.bindings.some((b) => b.tenant_id === null && b.role === 'owner'));
+    const platform = state.me.kind === 'break_glass' || state.me.kind === 'local_owner' || (state.me.kind === 'user' && state.me.bindings.some((b) => b.tenant_id === null && b.role === 'owner'));
     return {
       config: state.config, me: state.me, tenants: state.tenants, tenant: state.tenant, platform,
       setTenant: (id) => { saveTenant(id); setState((s) => (s ? { ...s, tenant: id } : s)); },
@@ -77,7 +77,7 @@ export function Shell({ children }: { children: ReactNode }) {
   if (error) return <main className="mx-auto max-w-lg p-8"><ErrorBox error={error} /><Link className="mt-4 inline-block underline" href="/login/">Back to login</Link></main>;
   if (!ctx) return <main className="p-8 text-sm text-zinc-500">Loading…</main>;
 
-  const who = ctx.me.kind === 'break_glass' ? 'break-glass' : ctx.me.kind === 'api_token' ? 'API token' : (ctx.me.email ?? ctx.me.subject);
+  const who = ctx.me.kind === 'break_glass' ? 'break-glass' : ctx.me.kind === 'local_owner' ? 'local owner' : ctx.me.kind === 'api_token' ? 'API token' : (ctx.me.email ?? ctx.me.subject);
   return (
     <AppCtx.Provider value={ctx}>
       {ctx.config.environment !== 'production' && (
@@ -87,9 +87,10 @@ export function Shell({ children }: { children: ReactNode }) {
       )}
       <div className="flex min-h-screen flex-col md:flex-row">
         <aside className="border-b border-zinc-200 bg-white p-4 md:w-56 md:border-b-0 md:border-r dark:border-zinc-800 dark:bg-zinc-900">
-          <p className="mb-4 text-lg font-bold text-brand">Hygieia</p>
+          <p className="text-lg font-bold text-brand">Hygieia</p>
+          <p className="mb-4 text-xs text-zinc-500">{ctx.config.mode === 'standalone' ? 'Standalone node' : 'Server'}</p>
           <nav aria-label="Main" className="flex flex-wrap gap-1 md:flex-col">
-            {NAV.filter((n) => !n.platformOnly || ctx.platform).map((n) => {
+            {NAV.filter((n) => (!n.platformOnly || ctx.platform) && (!n.serverOnly || ctx.config.mode !== 'standalone')).map((n) => {
               const active = n.href === '/' ? path === '/' : path.startsWith(n.href);
               return <Link key={n.href} href={n.href} aria-current={active ? 'page' : undefined}
                 className={`rounded-md px-3 py-1.5 text-sm ${active ? 'bg-brand/10 font-semibold text-brand' : 'hover:bg-zinc-100 dark:hover:bg-zinc-800'}`}>{n.label}</Link>;
@@ -105,7 +106,7 @@ export function Shell({ children }: { children: ReactNode }) {
             </label>
             <div className="flex items-center gap-3 text-sm">
               <span data-testid="who">{who}</span>
-              {ctx.platform && <Badge tone="amber">platform</Badge>}
+              {ctx.platform && ctx.config.mode !== 'standalone' && <Badge tone="amber">platform</Badge>}
               <Button variant="ghost" onClick={() => { clearSession(); window.location.assign('/login/'); }}>Sign out</Button>
             </div>
           </header>

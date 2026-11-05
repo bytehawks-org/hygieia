@@ -11,6 +11,7 @@ hygeia-api.workspace = true
 hygeia-dns.workspace = true
 hygeia-store.workspace = true
 hygeia-lists.workspace = true
+hygeia-runtime.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 tokio.workspace = true

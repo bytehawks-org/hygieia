@@ -14,6 +14,7 @@ hygeia-core = { path = "crates/hygeia-core" }
 hygeia-audit = { path = "crates/hygeia-audit" }
 hygeia-store = { path = "crates/hygeia-store" }
 hygeia-lists = { path = "crates/hygeia-lists" }
+hygeia-runtime = { path = "crates/hygeia-runtime" }
 hygeia-api = { path = "crates/hygeia-api" }
 hygeia-dns = { path = "crates/hygeia-dns" }
 hygeia-proxy = { path = "crates/hygeia-proxy" }

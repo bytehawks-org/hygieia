@@ -52,8 +52,37 @@ impl BreakGlass {
     }
 }
 
+/// The machine owner's credential on a standalone node: Owner-equivalent, generated at install and
+/// kept in a file only the owning account can read. Unlike break-glass it is the normal way in, so
+/// it is not flagged as an emergency in the audit trail (actor `local-owner`).
+pub struct LocalOwner {
+    hash: [u8; 32],
+}
+
+impl LocalOwner {
+    pub fn new(secret: &str) -> Result<Self, String> {
+        if secret.chars().count() < BREAK_GLASS_MIN_LEN {
+            return Err(format!(
+                "local owner secret must be at least {BREAK_GLASS_MIN_LEN} characters"
+            ));
+        }
+        Ok(Self {
+            hash: hash_secret(secret),
+        })
+    }
+
+    fn matches(&self, token: &str) -> bool {
+        let a = hash_secret(token);
+        a.iter()
+            .zip(self.hash.iter())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
+    }
+}
+
 #[derive(Default)]
 pub struct AuthConfig {
+    pub local_owner: Option<LocalOwner>,
     pub break_glass: Option<BreakGlass>,
     pub oidc: Option<OidcVerifier>,
 }
@@ -61,6 +90,7 @@ pub struct AuthConfig {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Principal {
+    LocalOwner,
     BreakGlass,
     ApiToken {
         id: String,
@@ -89,6 +119,7 @@ impl Principal {
     /// Stable identifier for audit records.
     pub fn actor(&self) -> String {
         match self {
+            Principal::LocalOwner => "local-owner".into(),
             Principal::BreakGlass => "break-glass".into(),
             Principal::ApiToken { id, .. } => format!("api-token:{id}"),
             Principal::User { id, .. } => format!("user:{id}"),
@@ -104,7 +135,7 @@ impl Principal {
     /// bindings; a tenant-scoped "owner" binding does not escalate.
     pub fn can(&self, perm: Permission, tenant: Option<&str>) -> bool {
         match self {
-            Principal::BreakGlass => true,
+            Principal::LocalOwner | Principal::BreakGlass => true,
             Principal::ApiToken {
                 tenant_id, role, ..
             } => {
@@ -127,7 +158,7 @@ impl Principal {
     /// Does the principal hold *any* role allowing `perm` (anywhere)?
     pub fn can_anywhere(&self, perm: Permission) -> bool {
         match self {
-            Principal::BreakGlass => true,
+            Principal::LocalOwner | Principal::BreakGlass => true,
             Principal::ApiToken { role, .. } => role.allows(perm),
             Principal::User { bindings, .. } => bindings.iter().any(|b| b.role.allows(perm)),
         }
@@ -158,6 +189,11 @@ pub async fn authenticate(
 ) -> Result<Principal, AuthError> {
     let token = bearer(headers).ok_or(AuthError::Unauthenticated)?;
 
+    if let Some(lo) = &cfg.local_owner
+        && lo.matches(token)
+    {
+        return Ok(Principal::LocalOwner);
+    }
     if let Some(bg) = &cfg.break_glass
         && bg.matches(token)
     {

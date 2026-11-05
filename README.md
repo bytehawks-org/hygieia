@@ -37,9 +37,40 @@ flowchart TD
 | `hygeia-store` | PostgreSQL (sqlx) is the production store: RLS tenant isolation, per-tenant audit chain, composite FKs. tenants/groups, users, role bindings, API tokens. In-memory store for tests. Missing: sqlx offline cache |
 | `hygeia-api` | Enroll, bundle (ETag/304), rules CRUD, simulate (dry-run), audit + verify. Static admin token. `/v1/admin/lists` (+`/refresh`). Missing: OIDC + RBAC wiring, OpenAPI (utoipa), gRPC, groups/time windows, regex rules |
 | `hygeia-dns` | UDP server, block via NXDOMAIN/null IP, plain UDP upstream. Missing: TCP, DoT/DoH/DoQ, DoT upstream, tenant resolution, query log, metrics |
-| `hygeia-proxy` | Skeleton (CONNECT host decision) |
+| `hygeia-proxy` | **Standalone node** (binary `hygeia-proxy`): file-backed store, persisted signing key and local-owner credential, extension feed, local admin UI, Host/Origin guard, opt-in local DNS, CLI. `mode = "connected"` is not implemented yet (roadmap 2); no packaging/service/tray yet (roadmap 4). See *Standalone node* |
+| `hygeia-runtime` | Shared helpers (list refresher, DNS follower, key files, `[lists]` config) used by the server and the node |
 | `hygeia-blocker` | Engine (signature check + rollback guard, URL/host verdicts, cosmetics, DNR plan) native + WASM; Chrome MV3 and Firefox MV3 extension in `extension/` (enrollment, bundle sync, DNR or webRequest blocking, element hiding, scriptlets); Chromium e2e-tested in a real browser, Firefox lint + fake-API tests only (not yet run in real Firefox). Missing: procedural selectors, more scriptlets, per-tenant fail-closed — see `extension/README.md` |
 | `web/` | Admin UI: Next.js 16 static export + Tailwind, served by the API (no Node at runtime): overview, rules + what-if simulation, devices + one-time enrollment tokens, filter-list status/licenses, audit + chain verification, groups / role bindings / API tokens, tenants. Token and OIDC (authorization code + PKCE) login. Real-browser e2e against the real server and a mock IdP. Missing: OIDC refresh (session ends with the ID token), OpenAPI-generated client, i18n |
+
+## Standalone node
+
+`hygeia-proxy` is the installable local server (design: `docs/architecture/node.md`). Standalone mode needs no database, no OIDC and no network configuration:
+
+```bash
+(cd web && npm ci && npm run build)
+cargo run -p hygeia-proxy -- run           # foreground; UI + API + extension feed on http://127.0.0.1:8470/
+hygeia-proxy open                           # opens the UI already signed in as the local owner
+hygeia-proxy pubkey                         # public key to pin in the browser extension
+hygeia-proxy info | token | check-config
+```
+
+State lives in one directory (`hygeia-proxy info` prints it; override with `--data-dir` or `HYGEIA_PROXY_DATA_DIR`): `state.json` (atomic snapshot of rules, devices, tokens and the audit chain, mode 0600, previous copy kept as `.bak`), `signing.key` (stable: browsers pin its public half), `owner.token` (the local owner credential), optional `hygeia-proxy.toml`. A damaged or tampered `state.json` (including a broken audit chain) stops the node instead of being silently reset.
+
+```toml
+# hygeia-proxy.toml, every section optional
+[http]
+listen = "127.0.0.1:8470"      # loopback by default; other addresses need allow_lan = true + allowed_hosts
+[dns]
+mode = "off"                    # default: no DNS, OS resolver untouched. "local": filter DNS on this machine
+listen = "127.0.0.1:5353"       # port 53 needs privileges
+upstream = ["9.9.9.9:53"]
+[lists]
+refresh_hours = 12              # same [lists] section as the server
+```
+
+Local security: loopback only; every request must carry an expected `Host` header (blocks DNS rebinding) and state-changing requests a same-origin (or, for the extension endpoints only, an extension) `Origin`; the credential never appears in process arguments (`open` uses a short-lived private redirect page and the URL *fragment*). The browser extension points at the node's URL and pins `hygeia-proxy pubkey`.
+
+Not yet: connecting to a central server, packaging (deb/rpm/MSI), Windows service, tray icon, OS-resolver integration. Linux is tested; **Windows is not**: only the core, audit, store and DNS crates were cross-checked for `x86_64-pc-windows-gnu` (the rest needs a Windows C toolchain; a `windows-latest` CI job is configured but unproven).
 
 ## Admin UI
 

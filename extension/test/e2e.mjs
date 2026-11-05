@@ -4,7 +4,7 @@
 import { createRequire } from 'node:module';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
@@ -13,7 +13,8 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const { chromium } = require('playwright');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const ADMIN = 'e2e-break-glass-secret-0123456789abcdef';
+const NODE = process.env.E2E_TARGET === 'node'; // run against the standalone node instead of the server
+let ADMIN = 'e2e-break-glass-secret-0123456789abcdef';
 const API = 'http://127.0.0.1:18080';
 
 const listen = (handler, port) => new Promise((res) => { const s = http.createServer(handler).listen(port, '127.0.0.1', () => res(s)); });
@@ -48,7 +49,7 @@ setTimeout(() => { window.adsEnabled = true; window.__ads = window.adsEnabled; w
 // --- hygeia ---
 const dir = mkdtempSync(path.join(tmpdir(), 'hygeia-e2e-'));
 const cfg = path.join(dir, 'hygeia.toml');
-writeFileSync(cfg, `
+const cfg_text = `
 [api]
 listen = "127.0.0.1:18080"
 [auth]
@@ -76,13 +77,30 @@ format = "domains"
 license = "CC0-1.0"
 attribution = "e2e"
 network = true
+`;
+writeFileSync(cfg, cfg_text);
+let hy;
+if (NODE) {
+  // node config: no [auth]/[api]; own data dir, owner credential read from its file
+  const nodeCfg = path.join(dir, 'hygeia-proxy.toml');
+  writeFileSync(nodeCfg, `
+[http]
+listen = "127.0.0.1:18080"
+[lists]
+sources = []
+allow_insecure_http = true
+${cfg_text.split('[lists]')[1].split('\n').filter((l) => !/^(sources|allow_insecure_http) /.test(l)).join('\n')}
 `);
-const hy = spawn(path.join(root, 'target/debug/hygeia'), [cfg], { env: { ...process.env, HYGEIA_BREAK_GLASS_TOKEN: ADMIN }, stdio: 'inherit' });
+  hy = spawn(path.join(root, 'target/debug/hygeia-proxy'), ['--data-dir', dir, '--config', nodeCfg, 'run'], { stdio: 'inherit' });
+} else {
+  hy = spawn(path.join(root, 'target/debug/hygeia'), [cfg], { env: { ...process.env, HYGEIA_BREAK_GLASS_TOKEN: ADMIN }, stdio: 'inherit' });
+}
 const cleanup = async () => { hy.kill(); lists.close(); content.close(); };
 process.on('exit', () => hy.kill());
 
 try {
   for (let i = 0; i < 50; i++) { try { if ((await fetch(`${API}/healthz`)).ok) break; } catch {} await new Promise((r) => setTimeout(r, 200)); }
+  if (NODE) ADMIN = readFileSync(path.join(dir, 'owner.token'), 'utf8').trim();
   const admin = (p, init = {}) => fetch(API + p, { ...init, headers: { authorization: `Bearer ${ADMIN}`, 'content-type': 'application/json' } });
   // wait until lists are loaded
   for (let i = 0; i < 50; i++) {

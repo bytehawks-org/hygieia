@@ -6,7 +6,7 @@ Order matters: items 1–4 were requested ahead of the previously suggested step
 
 | # | Item | Why / outcome | Depends on |
 |---|---|---|---|
-| 1 | **Node core** (`hygeia-proxy` as installable node, standalone mode) | One binary: bundle feed for the extension + embedded control plane with a file-backed store + local UI; **DNS off by default, opt-in** (local filtering or forward to the cloud service); runs in the foreground on Linux and Windows (cross-compiled) | design: `docs/architecture/node.md` |
+| 1 | **Node core** (standalone mode implemented; Windows unverified) (`hygeia-proxy` as installable node, standalone mode) | One binary: bundle feed for the extension + embedded control plane with a file-backed store + local UI; **DNS off by default, opt-in** (local filtering or forward to the cloud service); runs in the foreground on Linux and Windows (cross-compiled) | design: `docs/architecture/node.md` |
 | 2 | **Connected mode** | Node enrols with a central server (`hyg_node_` credential), relays browser enrolments, fetches/verifies/caches central bundles on disk, keeps enforcing during outages, forwards audit/telemetry | 1, central node endpoints (`/v1/node/*`) |
 | 3 | **Central redundancy** | Several server instances behind a load balancer: bundles compiled once and persisted in PostgreSQL (stable ETag/version), coordinated list refresh, health/readiness, graceful shutdown | PostgreSQL store |
 | 4 | **Packaging, service and graphical mode** | systemd unit + `.deb`/`.rpm`, Windows service + MSI, tray icon, local UI first-run wizard; OS-resolver integration only as an explicit opt-in step, with safe revert; `windows-latest` CI job | 1 (2 for connected wizard) |
@@ -14,6 +14,8 @@ Order matters: items 1–4 were requested ahead of the previously suggested step
 | 6 | **OpenAPI + generated client** | utoipa schema, generated TypeScript client replaces the hand-written types | — |
 
 ## Done
+
+Node core, standalone mode (item 1): file store, stable keys, local owner credential, host/origin guard, opt-in DNS, CLI, e2e with the extension and the UI on Linux.
 
 Core engine and signed bundles · audit hash chain · PostgreSQL store with RLS · list catalogue, downloader and cosmetic/scriptlet parsing · blocker engine, Chrome and Firefox extensions · OIDC/API-token/break-glass authentication with RBAC · admin UI · per-tenant list selection.
 
