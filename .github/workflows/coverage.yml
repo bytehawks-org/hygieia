@@ -1,8 +1,9 @@
 name: coverage
 # Line coverage of the Rust workspace (no PostgreSQL: the PG suites are skipped here and run in `ci`).
+# Release tags and manual runs only (no per-push or scheduled runs).
 on:
   push:
-    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 permissions:
   contents: read

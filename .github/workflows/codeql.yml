@@ -1,10 +1,9 @@
 name: codeql
+# Release tags and manual runs only (no per-push or scheduled runs).
 on:
   push:
-    branches: [main]
-  pull_request:
-  schedule:
-    - cron: '23 4 * * 1'
+    tags: ['v*']
+  workflow_dispatch:
 permissions:
   contents: read
   security-events: write

@@ -57,11 +57,13 @@ Each test creates and drops its own database. Without these variables the Postgr
 
 | Workflow | When | Content |
 |---|---|---|
-| `ci` | push, PR | `test` (PostgreSQL 17 service: fmt, clippy `-D warnings`, `cargo test --workspace`, wasm check) · `extension` (WASM build, extension unit tests, web-ext lint) · `extension-e2e` (real Chromium + extension against server and node; **advisory** until its first green run on GitHub) · `web` (typecheck, unit, UI e2e, node e2e) · `package-linux` (.deb) · `windows` (build, tests, zip, MSI via WiX; **advisory**: `continue-on-error`) |
-| `codeql` | push to main, PR, weekly | CodeQL for Rust, JavaScript/TypeScript, GitHub Actions |
-| `audit` | push to main, PR on dependency files, daily | `cargo audit`, `cargo deny check licenses bans sources`, `npm audit` |
-| `coverage` | push to main, manual | `cargo llvm-cov` summary and `lcov.info` as artefacts |
-| `release` | tag `v*` or manual | `.deb`, tarballs, Windows zip, extension zips, `SHA256SUMS` → draft GitHub Release |
+| `ci` | called by `release`, or manual | `test` (PostgreSQL 17 service: fmt, clippy `-D warnings`, `cargo test --workspace`, wasm check) · `extension` (WASM build, extension unit tests, web-ext lint) · `extension-e2e` (real Chromium + extension against server and node; **advisory** until its first green run on GitHub) · `web` (OpenAPI/TypeScript freshness, typecheck, unit, UI e2e, node e2e) · `windows` (build and tests; **advisory**: `continue-on-error`) |
+| `codeql` | tag `v*` or manual | CodeQL for Rust, JavaScript/TypeScript, GitHub Actions |
+| `audit` | tag `v*` or manual | `cargo audit`, `cargo deny check licenses bans sources`, `npm audit` |
+| `coverage` | tag `v*` or manual | `cargo llvm-cov` summary and `lcov.info` as artefacts |
+| `release` | tag `v*` or manual | runs `ci` first and publishes only if it passes; builds `.deb`, tarballs, Windows zip + MSI, extension zips, `SHA256SUMS` → draft GitHub Release |
+
+**Actions run only when a release tag is created** (or by hand from the Actions tab): there is no per-push, per-PR or scheduled run, to save resources. The day-to-day gate is local: `scripts/check-all.sh --all`. Consequently a push or PR gets no automatic check, and dependency PRs (Dependabot) are not tested until a tag.
 
 ## What is verified, and what is not
 

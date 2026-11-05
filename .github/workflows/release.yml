@@ -18,6 +18,10 @@ env:
   TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
+  # The full test suite runs once per tag, here, and gates publication.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   web:
     runs-on: ubuntu-latest
     steps:
@@ -102,7 +106,7 @@ jobs:
         with: { name: extensions, path: hygeia-blocker-*.zip }
 
   publish:
-    needs: [linux, windows, extensions]
+    needs: [ci, linux, windows, extensions]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

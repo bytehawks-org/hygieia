@@ -1,12 +1,10 @@
 name: audit
 # Supply-chain checks: known vulnerabilities (RustSec, npm) and dependency licences.
+# Release tags and manual runs only (no per-push or scheduled runs).
 on:
   push:
-    branches: [main]
-  pull_request:
-    paths: ['**/Cargo.toml', 'Cargo.lock', 'deny.toml', 'web/package*.json', 'extension/package*.json', '.github/workflows/audit.yml']
-  schedule:
-    - cron: '41 5 * * *'
+    tags: ['v*']
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
