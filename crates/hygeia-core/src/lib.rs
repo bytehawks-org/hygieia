@@ -4,6 +4,7 @@
 //! This keeps the crate compilable to `wasm32` for the browser extension.
 
 pub mod bundle;
+pub mod cidr;
 pub mod cosmetic;
 pub mod cosmetic_list;
 pub mod domain;

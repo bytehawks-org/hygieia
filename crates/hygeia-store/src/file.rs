@@ -77,6 +77,8 @@ struct Snapshot {
     /// Added after format 1 shipped: absent in older files.
     #[serde(default)]
     dns_tokens: Vec<Secret<crate::DnsToken>>,
+    #[serde(default)]
+    dns_settings: Vec<(String, crate::DnsSettings)>,
     policies: Vec<(String, ListPolicy)>,
     subs: Vec<(String, Subscription)>,
 }
@@ -136,6 +138,11 @@ impl MemoryStore {
                     item: t.clone(),
                     secret_hash: *h,
                 })
+                .collect(),
+            dns_settings: s
+                .dns_settings
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
             policies: s.policies.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             subs: s.subs.clone(),
@@ -198,6 +205,7 @@ impl MemoryStore {
                 .into_iter()
                 .map(|x| (x.item, x.secret_hash))
                 .collect();
+            s.dns_settings = snap.dns_settings.into_iter().collect();
             s.policies = snap.policies.into_iter().collect();
             s.subs = snap.subs;
         }
@@ -414,6 +422,39 @@ impl Store for FileStore {
 
     async fn list_dns_tokens(&self, t: &str) -> Result<Vec<crate::DnsToken>> {
         self.inner.list_dns_tokens(t).await
+    }
+
+    async fn dns_settings(&self, t: &str) -> Result<crate::DnsSettings> {
+        self.inner.dns_settings(t).await
+    }
+
+    async fn set_dns_settings(&self, t: &str, st: crate::DnsSettings) -> Result<()> {
+        let r = self.inner.set_dns_settings(t, st).await;
+        if r.is_ok() {
+            self.save();
+        }
+        r
+    }
+
+    // The query log is high-volume and not persisted by the file store (the standalone node has no
+    // cloud DNS); entries live in memory until restart.
+    async fn append_query_log(&self, t: &str, e: &[crate::QueryLogEntry]) -> Result<()> {
+        self.inner.append_query_log(t, e).await
+    }
+
+    async fn query_log(
+        &self,
+        t: &str,
+        since: i64,
+        limit: u32,
+        q: Option<&str>,
+        a: Option<&str>,
+    ) -> Result<Vec<crate::QueryLogEntry>> {
+        self.inner.query_log(t, since, limit, q, a).await
+    }
+
+    async fn purge_query_log(&self, t: &str, before: i64) -> Result<u64> {
+        self.inner.purge_query_log(t, before).await
     }
 
     // Coordination state is ephemeral: not persisted.

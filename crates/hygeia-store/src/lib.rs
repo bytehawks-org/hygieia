@@ -140,6 +140,22 @@ pub trait Store: Send + Sync {
     /// `(key, hash)` of every shared artefact whose key starts with `prefix`.
     async fn shared_index(&self, prefix: &str) -> Result<Vec<(String, String)>>;
     async fn get_shared(&self, key: &str) -> Result<Option<(String, Vec<u8>)>>;
+    /// Per-tenant cloud-DNS settings (defaults when never set).
+    async fn dns_settings(&self, tenant_id: &str) -> Result<DnsSettings>;
+    async fn set_dns_settings(&self, tenant_id: &str, s: DnsSettings) -> Result<()>;
+    /// Append pseudonymised query-log entries (callers check `log_enabled`).
+    async fn append_query_log(&self, tenant_id: &str, entries: &[QueryLogEntry]) -> Result<()>;
+    /// Newest first. `qname_contains` is a case-insensitive substring; `action` is `allow`|`block`.
+    async fn query_log(
+        &self,
+        tenant_id: &str,
+        since: i64,
+        limit: u32,
+        qname_contains: Option<&str>,
+        action: Option<&str>,
+    ) -> Result<Vec<QueryLogEntry>>;
+    /// Delete entries older than `before` (unix seconds); returns how many. `i64::MAX` clears all.
+    async fn purge_query_log(&self, tenant_id: &str, before: i64) -> Result<u64>;
     /// Cheap liveness check of the backing store (readiness probe).
     async fn ping(&self) -> Result<()>;
 
@@ -316,6 +332,43 @@ pub struct ApiToken {
     pub revoked: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DnsSettings {
+    /// Write the query log for this tenant (default off: data minimisation).
+    pub log_enabled: bool,
+    /// Days to keep query-log entries (1..=365).
+    pub retention_days: u32,
+    /// Per-tenant failure policy when no bundle is available; `None` = server default.
+    pub fail_open: Option<bool>,
+    /// `nxdomain` | `null_ip`; `None` = server default.
+    pub block_mode: Option<String>,
+}
+
+impl Default for DnsSettings {
+    fn default() -> Self {
+        Self {
+            log_enabled: false,
+            retention_days: 30,
+            fail_open: None,
+            block_mode: None,
+        }
+    }
+}
+
+/// One DNS query as logged: the client is a keyed, daily-rotating pseudonym, never the IP.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryLogEntry {
+    pub ts: i64,
+    pub group_id: String,
+    pub token_id: Option<String>,
+    pub transport: String,
+    pub client: String,
+    pub qname: String,
+    pub qtype: String,
+    pub action: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DnsToken {
     pub id: String,
@@ -359,6 +412,8 @@ pub(crate) struct State {
     pub(crate) rules: Vec<Rule>,
     pub(crate) bundle_version: HashMap<(String, String), u64>,
     pub(crate) compiled: HashMap<(String, String), StoredBundle>,
+    pub(crate) dns_settings: HashMap<String, DnsSettings>,
+    pub(crate) query_log: HashMap<String, Vec<QueryLogEntry>>,
     pub(crate) leases: HashMap<String, (String, i64)>,
     pub(crate) shared: HashMap<String, (String, Vec<u8>)>,
     pub(crate) audit: HashMap<String, AuditLog>,
@@ -577,6 +632,82 @@ impl Store for MemoryStore {
                 Ok(candidate)
             }
         }
+    }
+
+    async fn dns_settings(&self, tenant_id: &str) -> Result<DnsSettings> {
+        Ok(self
+            .s
+            .lock()
+            .unwrap()
+            .dns_settings
+            .get(tenant_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn set_dns_settings(&self, tenant_id: &str, st: DnsSettings) -> Result<()> {
+        if !(1..=365).contains(&st.retention_days)
+            || st
+                .block_mode
+                .as_deref()
+                .is_some_and(|m| m != "nxdomain" && m != "null_ip")
+        {
+            return Err(StoreError::NotFound);
+        }
+        let mut s = self.s.lock().unwrap();
+        s.dns_settings.insert(tenant_id.to_string(), st);
+        Ok(())
+    }
+
+    async fn append_query_log(&self, tenant_id: &str, entries: &[QueryLogEntry]) -> Result<()> {
+        const CAP: usize = 100_000; // in-memory store: bounded
+        let mut s = self.s.lock().unwrap();
+        let v = s.query_log.entry(tenant_id.to_string()).or_default();
+        v.extend_from_slice(entries);
+        if v.len() > CAP {
+            let excess = v.len() - CAP;
+            v.drain(..excess);
+        }
+        Ok(())
+    }
+
+    async fn query_log(
+        &self,
+        tenant_id: &str,
+        since: i64,
+        limit: u32,
+        qname_contains: Option<&str>,
+        action: Option<&str>,
+    ) -> Result<Vec<QueryLogEntry>> {
+        let needle = qname_contains.map(str::to_ascii_lowercase);
+        let s = self.s.lock().unwrap();
+        Ok(s.query_log
+            .get(tenant_id)
+            .map(|v| {
+                v.iter()
+                    .rev()
+                    .filter(|e| e.ts >= since)
+                    .filter(|e| {
+                        needle
+                            .as_ref()
+                            .is_none_or(|n| e.qname.to_ascii_lowercase().contains(n))
+                    })
+                    .filter(|e| action.is_none_or(|a| e.action == a))
+                    .take(limit as usize)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    async fn purge_query_log(&self, tenant_id: &str, before: i64) -> Result<u64> {
+        let mut s = self.s.lock().unwrap();
+        let Some(v) = s.query_log.get_mut(tenant_id) else {
+            return Ok(0);
+        };
+        let n = v.len();
+        v.retain(|e| e.ts >= before);
+        Ok((n - v.len()) as u64)
     }
 
     async fn try_lease(&self, name: &str, holder: &str, ttl_secs: i64, now: i64) -> Result<bool> {

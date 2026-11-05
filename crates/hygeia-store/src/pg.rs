@@ -14,7 +14,7 @@ use crate::{
     RuleAction, Selection, Store, StoreError, Subscription, Tenant, User, hash_secret, new_id,
     new_secret,
 };
-use crate::{DnsToken, PREFIX_DNS, StoredBundle};
+use crate::{DnsSettings, DnsToken, PREFIX_DNS, QueryLogEntry, StoredBundle};
 
 #[derive(Clone)]
 pub struct PgStore {
@@ -477,6 +477,123 @@ impl Store for PgStore {
             .await
             .map_err(map_err)?;
         Ok(r.map(|r| (r.get("hash"), r.get("bytes"))))
+    }
+
+    async fn dns_settings(&self, tenant_id: &str) -> Result<DnsSettings> {
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        let row = sqlx::query("select log_enabled, retention_days, fail_open, block_mode from dns_settings where tenant_id = $1::uuid")
+            .bind(tenant_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_err)?;
+        tx.commit().await.map_err(map_err)?;
+        Ok(row.map_or_else(DnsSettings::default, |r| DnsSettings {
+            log_enabled: r.get(0),
+            retention_days: r.get::<i32, _>(1) as u32,
+            fail_open: r.get(2),
+            block_mode: r.get(3),
+        }))
+    }
+
+    async fn set_dns_settings(&self, tenant_id: &str, s: DnsSettings) -> Result<()> {
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        // CHECK constraints reject out-of-range retention and unknown block modes
+        sqlx::query(
+            "insert into dns_settings (tenant_id, log_enabled, retention_days, fail_open, block_mode)
+             values ($1::uuid, $2, $3, $4, $5)
+             on conflict (tenant_id) do update set log_enabled = excluded.log_enabled,
+               retention_days = excluded.retention_days, fail_open = excluded.fail_open,
+               block_mode = excluded.block_mode",
+        )
+        .bind(tenant_id)
+        .bind(s.log_enabled)
+        .bind(s.retention_days as i32)
+        .bind(s.fail_open)
+        .bind(s.block_mode)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_err)?;
+        tx.commit().await.map_err(map_err)?;
+        Ok(())
+    }
+
+    async fn append_query_log(&self, tenant_id: &str, entries: &[QueryLogEntry]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        for e in entries {
+            sqlx::query(
+                "insert into query_log (tenant_id, ts, group_id, token_id, transport, client, qname, qtype, action, reason)
+                 values ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            )
+            .bind(tenant_id)
+            .bind(e.ts)
+            .bind(&e.group_id)
+            .bind(&e.token_id)
+            .bind(&e.transport)
+            .bind(&e.client)
+            .bind(&e.qname)
+            .bind(&e.qtype)
+            .bind(&e.action)
+            .bind(&e.reason)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_err)?;
+        }
+        tx.commit().await.map_err(map_err)?;
+        Ok(())
+    }
+
+    async fn query_log(
+        &self,
+        tenant_id: &str,
+        since: i64,
+        limit: u32,
+        qname_contains: Option<&str>,
+        action: Option<&str>,
+    ) -> Result<Vec<QueryLogEntry>> {
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        let rows = sqlx::query(
+            "select ts, group_id, token_id, transport, client, qname, qtype, action, reason from query_log
+             where ts >= $1 and ($2::text is null or position(lower($2) in lower(qname)) > 0)
+               and ($3::text is null or action = $3)
+             order by ts desc, id desc limit $4",
+        )
+        .bind(since)
+        .bind(qname_contains)
+        .bind(action)
+        .bind(limit as i64)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_err)?;
+        tx.commit().await.map_err(map_err)?;
+        Ok(rows
+            .iter()
+            .map(|r| QueryLogEntry {
+                ts: r.get(0),
+                group_id: r.get(1),
+                token_id: r.get(2),
+                transport: r.get(3),
+                client: r.get(4),
+                qname: r.get(5),
+                qtype: r.get(6),
+                action: r.get(7),
+                reason: r.get(8),
+            })
+            .collect())
+    }
+
+    async fn purge_query_log(&self, tenant_id: &str, before: i64) -> Result<u64> {
+        let mut tx = self.tenant_tx(tenant_id).await?;
+        let n = sqlx::query("delete from query_log where ts < $1")
+            .bind(before)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_err)?
+            .rows_affected();
+        tx.commit().await.map_err(map_err)?;
+        Ok(n)
     }
 
     async fn ping(&self) -> Result<()> {

@@ -6,8 +6,8 @@ use hygeia_audit::Draft;
 
 use crate::rbac::Role;
 use crate::{
-    CatalogSource, ListPolicy, Rule, RuleAction, Selection, Store, StoreError, StoredBundle,
-    Subscription,
+    CatalogSource, DnsSettings, ListPolicy, QueryLogEntry, Rule, RuleAction, Selection, Store,
+    StoreError, StoredBundle, Subscription,
 };
 
 fn draft(tenant: &str, n: i64) -> Draft {
@@ -198,6 +198,124 @@ pub async fn run(st: &dyn Store, a: (&str, &str, &str), b: (&str, &str)) {
         Some(("h1b".to_string(), b"uno".to_vec()))
     );
     assert_eq!(st.get_shared("nope").await.unwrap(), None);
+
+    // --- DNS settings and the query log: off by default, tenant-isolated, retention purge ---
+    let d0 = st.dns_settings(ta).await.unwrap();
+    assert!(
+        !d0.log_enabled && d0.retention_days == 30,
+        "log is off by default"
+    );
+    let new = DnsSettings {
+        log_enabled: true,
+        retention_days: 7,
+        fail_open: Some(true),
+        block_mode: Some("null_ip".into()),
+    };
+    st.set_dns_settings(ta, new.clone()).await.unwrap();
+    assert_eq!(st.dns_settings(ta).await.unwrap(), new);
+    assert_eq!(
+        st.dns_settings(tb).await.unwrap(),
+        DnsSettings::default(),
+        "settings are per tenant"
+    );
+    assert!(
+        st.set_dns_settings(
+            ta,
+            DnsSettings {
+                retention_days: 0,
+                ..new.clone()
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        st.set_dns_settings(
+            ta,
+            DnsSettings {
+                retention_days: 366,
+                ..new.clone()
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        st.set_dns_settings(
+            ta,
+            DnsSettings {
+                block_mode: Some("bogus".into()),
+                ..new.clone()
+            }
+        )
+        .await
+        .is_err()
+    );
+    let q = |ts: i64, name: &str, action: &str| QueryLogEntry {
+        ts,
+        group_id: ga.into(),
+        token_id: Some("tok".into()),
+        transport: "doh".into(),
+        client: "abcd".into(),
+        qname: name.into(),
+        qtype: "A".into(),
+        action: action.into(),
+        reason: "ListBlock".into(),
+    };
+    st.append_query_log(
+        ta,
+        &[
+            q(100, "ads.example.com", "block"),
+            q(200, "example.org", "allow"),
+            q(300, "x.ADS.example.com", "block"),
+        ],
+    )
+    .await
+    .unwrap();
+    st.append_query_log(tb, &[q(250, "other-tenant.test", "allow")])
+        .await
+        .unwrap();
+    let all = st.query_log(ta, 0, 10, None, None).await.unwrap();
+    assert_eq!(
+        all.iter().map(|e| e.ts).collect::<Vec<_>>(),
+        vec![300, 200, 100],
+        "newest first"
+    );
+    assert_eq!(
+        st.query_log(ta, 150, 10, None, None).await.unwrap().len(),
+        2
+    );
+    assert_eq!(st.query_log(ta, 0, 1, None, None).await.unwrap().len(), 1);
+    assert_eq!(
+        st.query_log(ta, 0, 10, Some("ADS."), None)
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "case-insensitive substring"
+    );
+    assert_eq!(
+        st.query_log(ta, 0, 10, None, Some("allow"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        st.query_log(ta, 0, 10, Some("other-tenant"), None)
+            .await
+            .unwrap()
+            .is_empty(),
+        "tenant isolation"
+    );
+    assert_eq!(st.purge_query_log(ta, 250).await.unwrap(), 2);
+    assert_eq!(st.query_log(ta, 0, 10, None, None).await.unwrap().len(), 1);
+    assert_eq!(
+        st.query_log(tb, 0, 10, None, None).await.unwrap().len(),
+        1,
+        "purge is per tenant"
+    );
+    assert_eq!(st.purge_query_log(ta, i64::MAX).await.unwrap(), 1);
 
     // --- audit: one chain per tenant ---
     for n in 0..5 {
