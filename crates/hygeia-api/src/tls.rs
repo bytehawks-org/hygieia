@@ -18,6 +18,7 @@ pub struct TlsSource {
     cert: PathBuf,
     key: PathBuf,
     alpn: Vec<Vec<u8>>,
+    quic: bool,
     current: RwLock<Loaded>,
 }
 
@@ -28,7 +29,12 @@ fn mtimes(cert: &Path, key: &Path) -> Option<(SystemTime, SystemTime)> {
     ))
 }
 
-fn build(cert: &Path, key: &Path, alpn: &[Vec<u8>]) -> Result<Arc<rustls::ServerConfig>, BoxErr> {
+fn build(
+    cert: &Path,
+    key: &Path,
+    alpn: &[Vec<u8>],
+    quic: bool,
+) -> Result<Arc<rustls::ServerConfig>, BoxErr> {
     let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
         .map_err(|e| format!("{}: {e}", cert.display()))?
         .collect::<Result<_, _>>()
@@ -44,18 +50,32 @@ fn build(cert: &Path, key: &Path, alpn: &[Vec<u8>]) -> Result<Arc<rustls::Server
     .with_no_client_auth()
     .with_single_cert(chain, key)?;
     cfg.alpn_protocols = alpn.to_vec();
+    if quic {
+        // QUIC requires 0-RTT-capable configuration (RFC 9001 §4.6.1)
+        cfg.max_early_data_size = u32::MAX;
+    }
     Ok(Arc::new(cfg))
 }
 
 impl TlsSource {
     /// `alpn`: e.g. `["h2", "http/1.1"]` for HTTPS, `["dot"]` for DNS over TLS.
     pub fn load(cert: &Path, key: &Path, alpn: &[&str]) -> Result<Arc<Self>, BoxErr> {
+        Self::load_inner(cert, key, alpn, false)
+    }
+
+    /// Like [`load`](Self::load) but for QUIC (DoQ).
+    pub fn load_quic(cert: &Path, key: &Path, alpn: &[&str]) -> Result<Arc<Self>, BoxErr> {
+        Self::load_inner(cert, key, alpn, true)
+    }
+
+    fn load_inner(cert: &Path, key: &Path, alpn: &[&str], quic: bool) -> Result<Arc<Self>, BoxErr> {
         let alpn: Vec<Vec<u8>> = alpn.iter().map(|a| a.as_bytes().to_vec()).collect();
-        let cfg = build(cert, key, &alpn)?;
+        let cfg = build(cert, key, &alpn, quic)?;
         Ok(Arc::new(Self {
             cert: cert.to_path_buf(),
             key: key.to_path_buf(),
             alpn,
+            quic,
             current: RwLock::new((cfg, mtimes(cert, key))),
         }))
     }
@@ -70,7 +90,7 @@ impl TlsSource {
         if now.is_none() || now == self.current.read().unwrap().1 {
             return false;
         }
-        match build(&self.cert, &self.key, &self.alpn) {
+        match build(&self.cert, &self.key, &self.alpn, self.quic) {
             Ok(cfg) => {
                 *self.current.write().unwrap() = (cfg, now);
                 tracing::info!(cert = %self.cert.display(), "TLS certificate reloaded");

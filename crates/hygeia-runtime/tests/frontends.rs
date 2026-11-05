@@ -266,3 +266,116 @@ async fn dot_attributes_by_sni_label_or_registered_network() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test]
+async fn doq_attributes_by_sni_label_or_registered_network() {
+    let st = state().await;
+    let svc = st.dns.clone().unwrap();
+    let (tok, _) = st
+        .store
+        .create_dns_token(DEFAULT_TENANT, DEFAULT_GROUP, "doq", None, true)
+        .await
+        .unwrap();
+    let label = tok.dot_label.clone().unwrap();
+    st.store
+        .add_dns_network(DEFAULT_TENANT, DEFAULT_GROUP, "lo", "127.0.0.1/32")
+        .await
+        .unwrap();
+    svc.refresh_networks(st.store.as_ref()).await;
+
+    let dir = std::env::temp_dir().join(format!("hyg-doq-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ck = rcgen::generate_simple_self_signed(vec!["*.dns.test".to_string()]).unwrap();
+    let (c, k) = (dir.join("c.pem"), dir.join("k.pem"));
+    std::fs::write(&c, ck.cert.pem()).unwrap();
+    std::fs::write(&k, ck.signing_key.serialize_pem()).unwrap();
+    let tls = TlsSource::load_quic(&c, &k, &["doq"]).unwrap();
+    let addr = frontends::spawn_doq(st.clone(), "127.0.0.1:0", tls, "dns.test")
+        .await
+        .unwrap();
+
+    let pem = ck.cert.pem();
+
+    let ask = |from: &'static str, sni: String, q: Vec<u8>| {
+        let qc = quic_client(&pem);
+        async move {
+            let mut ep = quinn::Endpoint::client(format!("{from}:0").parse().unwrap()).unwrap();
+            ep.set_default_client_config(qc);
+            let conn = ep.connect(addr, &sni).unwrap().await.unwrap();
+            let (mut s, mut r) = conn.open_bi().await.unwrap();
+            let mut out = (q.len() as u16).to_be_bytes().to_vec();
+            out.extend_from_slice(&q);
+            s.write_all(&out).await.unwrap();
+            s.finish().unwrap();
+            let buf = tokio::time::timeout(Duration::from_secs(5), r.read_to_end(4096))
+                .await
+                .unwrap()
+                .unwrap();
+            conn.close(0u32.into(), b"done");
+            buf[2..].to_vec()
+        }
+    };
+
+    // unregistered client (127.0.0.2) with the token's label: attributed and filtered
+    assert_eq!(
+        rcode(
+            &ask(
+                "127.0.0.2",
+                format!("{label}.dns.test"),
+                query("ads.example.com")
+            )
+            .await
+        ),
+        3
+    );
+    assert_eq!(
+        rcode(
+            &ask(
+                "127.0.0.2",
+                format!("{label}.dns.test"),
+                query("example.org")
+            )
+            .await
+        ),
+        0
+    );
+    // unknown label from an unregistered client: refused; from a registered one: served
+    assert_eq!(
+        rcode(&ask("127.0.0.2", "nope.dns.test".into(), query("example.org")).await),
+        5
+    );
+    assert_eq!(
+        rcode(
+            &ask(
+                "127.0.0.1",
+                "nope.dns.test".into(),
+                query("ads.example.com")
+            )
+            .await
+        ),
+        3
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn quic_client(cert_pem: &str) -> quinn::ClientConfig {
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in
+        <rustls::pki_types::CertificateDer as rustls::pki_types::pem::PemObject>::pem_slice_iter(
+            cert_pem.as_bytes(),
+        )
+    {
+        roots.add(cert.unwrap()).unwrap();
+    }
+    let mut cfg = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    cfg.alpn_protocols = vec![b"doq".to_vec()];
+    quinn::ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(cfg).unwrap(),
+    ))
+}

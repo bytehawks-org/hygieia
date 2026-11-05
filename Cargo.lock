@@ -1200,6 +1200,7 @@ dependencies = [
  "hygeia-dns",
  "hygeia-lists",
  "hygeia-store",
+ "quinn",
  "rcgen",
  "rustls",
  "serde",

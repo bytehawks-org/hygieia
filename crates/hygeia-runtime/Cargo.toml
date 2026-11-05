@@ -18,6 +18,7 @@ serde_json.workspace = true
 serde.workspace = true
 getrandom = "0.3"
 sha2.workspace = true
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
 

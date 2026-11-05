@@ -209,3 +209,111 @@ async fn serve_stream<S: AsyncRead + AsyncWrite + Unpin>(
         }
     }
 }
+
+/// DNS over QUIC (RFC 9250): one query per bidirectional stream, 2-byte length prefix, ALPN `doq`.
+/// Attribution as for DoT: SNI label of a token, else the client's registered network. Address
+/// validation (QUIC Retry) is always on, so a spoofed source cannot use the server as a reflector.
+pub async fn spawn_doq(
+    state: Arc<AppState>,
+    listen: &str,
+    tls: Arc<TlsSource>,
+    dot_domain: &str,
+) -> Result<SocketAddr, BoxErr> {
+    let svc = service(&state)?;
+    let quic_cfg = quinn::crypto::rustls::QuicServerConfig::try_from(tls.config())
+        .map_err(|e| format!("DoQ TLS configuration: {e}"))?;
+    let mut server_cfg = quinn::ServerConfig::with_crypto(Arc::new(quic_cfg));
+    let transport = Arc::get_mut(&mut server_cfg.transport).expect("fresh transport config");
+    transport.max_concurrent_bidi_streams(100u8.into());
+    transport.max_concurrent_uni_streams(0u8.into());
+    transport.max_idle_timeout(Some(
+        Duration::from_secs(30).try_into().expect("valid timeout"),
+    ));
+    let sock: SocketAddr = listen
+        .parse()
+        .map_err(|e| format!("dns.doq listen {listen}: {e}"))?;
+    let endpoint = quinn::Endpoint::server(server_cfg, sock)
+        .map_err(|e| format!("dns.doq listen {listen}: {e}"))?;
+    let addr = endpoint.local_addr()?;
+    tracing::info!(listen = %addr, "cloud dns listening (doq)");
+    let suffix = format!(".{}", dot_domain.trim_matches('.').to_ascii_lowercase());
+    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    tokio::spawn(async move {
+        while let Some(incoming) = endpoint.accept().await {
+            if !incoming.remote_address_validated() && incoming.may_retry() {
+                let _ = incoming.retry();
+                continue;
+            }
+            let Ok(permit) = permits.clone().try_acquire_owned() else {
+                continue;
+            };
+            let (svc, state, suffix) = (svc.clone(), state.clone(), suffix.clone());
+            tokio::spawn(async move {
+                let _permit = permit;
+                let Ok(connecting) = incoming.accept() else {
+                    return;
+                };
+                let Ok(Ok(conn)) = tokio::time::timeout(Duration::from_secs(10), connecting).await
+                else {
+                    return;
+                };
+                let ip = conn.remote_address().ip();
+                let sni = conn
+                    .handshake_data()
+                    .and_then(|h| h.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
+                    .and_then(|h| h.server_name.clone())
+                    .map(|s| s.to_ascii_lowercase());
+                let label = sni
+                    .as_deref()
+                    .and_then(|s| s.strip_suffix(&suffix))
+                    .filter(|l| !l.is_empty() && !l.contains('.'))
+                    .map(str::to_string);
+                while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+                    let (svc, state, label) = (svc.clone(), state.clone(), label.clone());
+                    tokio::spawn(async move {
+                        let Ok(Ok(buf)) = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            recv.read_to_end(MAX_QUERY + 2),
+                        )
+                        .await
+                        else {
+                            return;
+                        };
+                        if buf.len() < 2
+                            || u16::from_be_bytes([buf[0], buf[1]]) as usize != buf.len() - 2
+                        {
+                            return;
+                        }
+                        let packet = &buf[2..];
+                        let r = match &label {
+                            Some(l) => {
+                                svc.resolve_from_label(&state, Some(l), ip, "doq", packet)
+                                    .await
+                            }
+                            None => svc.resolve_from_network(&state, ip, "doq", packet).await,
+                        };
+                        let reply = match r {
+                            Ok(r) => r,
+                            Err(e) => match failure_reply(&e, packet) {
+                                Some(r) => r,
+                                None => return,
+                            },
+                        };
+                        if reply.is_empty() || reply.len() > u16::MAX as usize {
+                            return;
+                        }
+                        let mut out = (reply.len() as u16).to_be_bytes().to_vec();
+                        out.extend_from_slice(&reply);
+                        if send.write_all(&out).await.is_ok() {
+                            let _ = send.finish();
+                            // let the client read the reply before the stream is dropped
+                            let _ =
+                                tokio::time::timeout(Duration::from_secs(2), send.stopped()).await;
+                        }
+                    });
+                }
+            });
+        }
+    });
+    Ok(addr)
+}

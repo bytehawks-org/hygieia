@@ -168,7 +168,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| e.to_string())?;
         }
         if !c.doq_listen.is_empty() {
-            return Err("cloud_dns.doq_listen is not available in this build".into());
+            if c.dot_domain.is_empty() {
+                return Err("cloud_dns.doq_listen needs cloud_dns.dot_domain".into());
+            }
+            if cfg.tls.cert.is_empty() {
+                return Err("cloud_dns.doq_listen needs [tls] cert and key".into());
+            }
+            let doq_tls = hygeia_api::tls::TlsSource::load_quic(
+                std::path::Path::new(&cfg.tls.cert),
+                std::path::Path::new(&cfg.tls.key),
+                &["doq"],
+            )
+            .map_err(|e| format!("[tls]: {e}"))?;
+            doq_tls.spawn_watcher();
+            hygeia_runtime::frontends::spawn_doq(
+                state.clone(),
+                &c.doq_listen,
+                doq_tls,
+                &c.dot_domain,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
         }
     }
 
