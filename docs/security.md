@@ -31,6 +31,8 @@ Boundaries: Internet ⇄ reverse proxy (TLS) ⇄ server ⇄ PostgreSQL; browser 
 **Database**
 - `hygeia_app` (runtime) is non-owner and subject to RLS (`app.tenant` set per transaction; absent = no rows); the schema owner is separate; pre-tenant lookups go through narrow `SECURITY DEFINER` functions; `audit_events` is append-only even for the owner.
 
+**Cloud DNS** — attribution is mandatory (token, label or registered network; registrable networks are limited so nobody can register `0.0.0.0/0`); per-token and per-source rate limits with a failed-authentication budget; DoT upstreams are certificate-verified and replies are id-checked; QUIC Retry; the query log is opt-in with keyed, daily-rotating pseudonyms; the metrics endpoint is off unless a token is set and compares digests.
+
 **Network surfaces**
 - Admin UI: CSP without `unsafe-inline` scripts (hashes of the build's bootstrap scripts), `frame-ancestors 'none'`, `nosniff`, `no-referrer`; data rendered through React escaping only.
 - Node: loopback default; `Host` allow-list (DNS rebinding); `Origin` check on state-changing requests (extension origins only on the extension endpoints); credential never in process arguments; LAN exposure needs two explicit settings.
@@ -41,12 +43,12 @@ Boundaries: Internet ⇄ reverse proxy (TLS) ⇄ server ⇄ PostgreSQL; browser 
 
 | Gap | Impact / mitigation |
 |---|---|
-| No TLS in the binaries | terminate TLS in front; redact DoH paths in proxy logs |
-| No rate limiting on the admin and enrolment endpoints (only DoH is limited) | rate-limit at the proxy; break-glass delays failures by 200 ms only |
+| TLS is optional in the server (`api.tls` + `[tls]`); the node serves plain HTTP on loopback | for the server enable native TLS or terminate in front; if a proxy is used, redact DoH paths in its logs and set `api.trusted_proxies` |
+| No rate limiting on the admin and enrolment endpoints (DNS transports are limited per token, per source and for failed authentications) | rate-limit at the proxy; break-glass delays failures by 200 ms only |
 | OIDC session has no refresh | session ends with the ID token |
 | Admin credential in `sessionStorage` | an XSS could read it; mitigated by CSP, not eliminated |
-| DoH token is in the URL | proxies, browsers and logs may record it; redact; prefer per-device tokens with expiry |
-| Cloud DNS: no query log, no per-IP limits, UDP-only plain upstream | not an open resolver, but not production-hardened SaaS yet |
+| DoH token is in the URL; the DoT/DoQ label is visible in the SNI | proxies, browsers and logs may record the token; the label is an identifier by design (anyone who learns it can use that tenant's resolver within its rate limit) — use registered networks where addresses are stable, per-device tokens with expiry, revoke on leak |
+| Cloud DNS: no DNSSEC validation, no active upstream health probes, no per-source *connection* limits (global caps only), UDP `REFUSED` answers go to spoofable sources (header-only, never larger than the query) | not an open resolver; review before running it as a public SaaS; put volumetric DDoS protection in front |
 | Audit sinks | no syslog/OTLP sink, no external anchoring of the chain head; an attacker with database owner rights could rewrite the whole chain consistently |
 | Node trust model | a compromised connected node sees device secrets passing through and can withhold updates; it cannot forge bundles |
 | Windows and Firefox | not run on real systems; treat as experimental |

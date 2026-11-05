@@ -7,7 +7,7 @@ Short version: `scripts/check-all.sh --all` runs everything and prints a PASS/FA
 | Layer | Command | What it proves | Needs |
 |---|---|---|---|
 | Format, lint | `cargo fmt --all -- --check` · `cargo clippy --workspace --all-targets -- -D warnings` | style, common bugs (CI is strict) | Rust |
-| Rust unit + integration (~80 tests) | `cargo test --workspace` | engine, parsers, bundle signing, audit chain, stores, API behaviour, node, connected relay, DNS decisions | Rust |
+| Rust unit + integration (~110 tests) | `cargo test --workspace` | engine, parsers, bundle signing, audit chain, stores, API behaviour, node, connected relay, DNS decisions, upstream failover (UDP/DoT/DoH), DoT/DoQ/UDP/TCP front-ends over real sockets, TLS reload and HTTPS serving, query-log privacy, rate limits, metrics | Rust |
 | Store conformance | included above (`hygeia-store`) | the **same** behavioural suite passes on the in-memory, file and PostgreSQL stores (tenancy, tokens, rules, bundles, leases, DNS tokens, audit) | PostgreSQL for the PG run |
 | PostgreSQL isolation | `cargo test -p hygeia-store --test pg` | RLS hides other tenants, runtime role cannot alter schema or audit, migrations apply from scratch | `HYGEIA_TEST_PG_ADMIN`, `HYGEIA_TEST_PG_APP` |
 | WASM build | `cargo check -p hygeia-core -p hygeia-blocker --target wasm32-unknown-unknown` | the engine stays I/O-free and portable | `rustup target add wasm32-unknown-unknown` |
@@ -24,7 +24,7 @@ They are the quickest way to *see* the system work and the best bug report attac
 
 `scripts/smoke-node.sh` (≈ 19 checks): starts the standalone node in a temp directory with opt-in DNS and checks mode, 401 without credential, owner identity, hostile `Host` → 421, cross-site POST → 403, rule creation, enrolment (and a bogus token → 401), `HYGB` bundle magic, 304 on `If-None-Match`, `simulate`, DNS NXDOMAIN from the rule, audit chain verification, and — after a **restart** — stable signing key, the device still authenticating, and a still-valid chain.
 
-`scripts/smoke-server.sh` (≈ 32 checks): starts the server (in-memory store, dev break-glass, cloud DNS on) and checks readiness and config, wrong break-glass → 401, tenant creation and **tenant isolation** of rules, a viewer API token (can read, cannot write, cannot mint tokens), enrolment and bundle, **DoH gating** (valid token → NXDOMAIN for a blocked name, unknown token and an API token → 404), audit chain and break-glass audit, then a **connected node** in front: pinned central key, relayed enrolment visible centrally, identical ETag through the node, and with the server **stopped** the cached bundle served with `X-Hygeia-Stale`, while an unknown credential gets nothing.
+`scripts/smoke-server.sh` (46 checks): starts the server (in-memory store, dev break-glass, cloud DNS, metrics, log key) and checks readiness and config, wrong break-glass → 401, tenant creation and **tenant isolation** of rules, a viewer API token (can read, cannot write, cannot mint tokens), enrolment and bundle, **DoH gating** (valid token → NXDOMAIN for a blocked name, unknown token and an API token → 404), audit chain and break-glass audit, then **cloud DNS** (opt-in query log without raw IP or token, open-resolver guard for networks, plain DNS `REFUSED` vs registered, metrics token), the audit chain, a **connected node** in front: pinned central key, relayed enrolment visible centrally, identical ETag through the node, and with the server **stopped** the cached bundle served with `X-Hygeia-Stale`, while an unknown credential gets nothing; finally, if `openssl` exists, the server with **native HTTPS** (certificate, HSTS, plain HTTP and unknown CA refused).
 
 Example output:
 
@@ -68,6 +68,7 @@ Each test creates and drops its own database. Without these variables the Postgr
 **Verified in automation:** everything in the table above on Linux, Chromium included.
 
 **Not verified:**
+- **Cloud DNS under load or against real resolvers/clients**: transports are exercised in-process and by smoke scenarios with fake upstreams; no throughput/latency-under-load numbers, no interoperability run with real DoT/DoQ/DoH clients or public resolvers, no DNSSEC.
 - **Windows**: the node, service, installer and tray have never run on Windows (only cross-type-checked; the `windows` CI job is the first real signal and is advisory).
 - **Firefox**: lint and fake-API tests only; never run in a real Firefox.
 - **systemd unit and `.deb` on a live systemd host**: package contents and `dpkg -i/-r` were exercised in a container without systemd.

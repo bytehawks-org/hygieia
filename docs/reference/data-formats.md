@@ -42,6 +42,15 @@ Actions written today: `rule.create`, `rule.delete`, `token.create` (enrolment),
 
 **CEF export** (`hygeia_audit::to_cef`): `CEF:0|Hygeia|Hygeia|0.1|<action>|<action>|3|rt=<ms> suser=<actor> cs1Label=tenant cs1=<tenant> dst=<target> cs2Label=hash cs2=<hash>` with CEF escaping. There is no HTTP endpoint for the export yet.
 
+## Query log entry
+
+```json
+{"ts": 1760000000, "group_id": "…", "token_id": "…|network id", "transport": "doh|dot|doq|udp|tcp",
+ "client": "9f2c41aa07d3be10", "qname": "ads.example.com", "qtype": "A", "action": "block", "reason": "ListBlock"}
+```
+
+`client = hex(HMAC-SHA256(day_key, address)[..8])`, `day_key = HMAC-SHA256(master, "hygeia-ip-pseudonym-v1|<tenant id>|<unix day>")`, `master = HYGEIA_LOG_KEY`. IPv4-mapped IPv6 is treated as IPv4; other IPv6 addresses are reduced to their /64 (first 8 octets). `token_id` is the DNS token id (not the secret) or the registered network id. Stored in table `query_log` (migration 0007, RLS, index on `(tenant_id, ts desc)`); purged by retention.
+
 ## Node state file (`state.json`)
 
 JSON snapshot, `format: 1`: tokens and devices (secret hashes as hex), rules, bundle versions, per-tenant audit events, tenants, groups, users, bindings, API tokens, DNS tokens (optional field), list policy, subscriptions. Written atomically (temp file, fsync, rename) with mode 0600; the previous copy is kept as `.bak`. On load every audit chain is verified.

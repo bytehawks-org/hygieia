@@ -23,7 +23,7 @@ export HYGEIA_DATABASE_URL=postgres://hygeia_app:***@db/hygeia      # runtime ro
 export HYGEIA_MIGRATE_URL=postgres://hygeia_owner:***@db/hygeia     # optional: apply migrations at startup
 ```
 
-Migrations (`crates/hygeia-store/migrations`): `0001` schema, RLS, enrolment functions · `0002` API-token lookup · `0003` list subscriptions · `0004` shared compiled bundles · `0005` shared blobs and leases · `0006` DNS tokens. Run them with the owner role only; the runtime role cannot alter the schema, and `audit_events` is append-only even for the owner (trigger).
+Migrations (`crates/hygeia-store/migrations`): `0001` schema, RLS, enrolment functions · `0002` API-token lookup · `0003` list subscriptions · `0004` shared compiled bundles · `0005` shared blobs and leases · `0006` DNS tokens · `0007` DNS settings and query log · `0008` registered DNS networks and DoT labels. Run them with the owner role only; the runtime role cannot alter the schema, and `audit_events` is append-only even for the owner (trigger).
 
 ## 2. Signing key
 
@@ -68,9 +68,11 @@ Run N replicas of the same Deployment, a Service for 8080, an Ingress with TLS, 
 
 Nothing to configure beyond a shared PostgreSQL and a shared `HYGEIA_SIGNING_KEY`. Bundles are compiled once and shared; one replica at a time downloads lists (lease) and publishes them for the others. Limits: failover of the list leader takes up to three minutes; a replica notices another's changes within five seconds. Design notes: [Architecture overview](../architecture/overview.md#central-redundancy).
 
-## 7. Reverse proxy and DNS
+## 7. TLS, reverse proxy and DNS
 
-Put TLS in front. Redact request paths in access logs if you enable [cloud DNS](cloud-dns.md) (the path is a credential). Restrict `/v1/admin/*` at the network layer if you can; break-glass in particular must never be reachable from the Internet.
+Two ways to get HTTPS: let the server do it (`api.tls = true` with `[tls] cert/key`; HTTP/1.1 and h2, HSTS, certificate re-read when the files change) or put a TLS-terminating proxy in front (then set `api.trusted_proxies` so client addresses are right).
+
+If you use a proxy,  Redact request paths in access logs if you enable [cloud DNS](cloud-dns.md) (the path is a credential). Restrict `/v1/admin/*` at the network layer if you can; break-glass in particular must never be reachable from the Internet.
 
 The built-in plain DNS server (`[dns]`, UDP, default tenant only) is meant for LAN use and tests. Internet-facing DNS is the DoH service.
 

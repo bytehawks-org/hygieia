@@ -16,16 +16,21 @@ The central server can expose filtering DNS over the network: the "cloud DNS" us
 6. **Operations**: stateless replicas behind a load balancer (UDP/TCP/TLS/HTTPS), readiness gated on having a verified bundle for each served tenant, metrics per tenant/list (Prometheus), graceful drain.
 7. **Failure policy** per tenant (fail-open / fail-closed when no bundle is available) and recorded in the audit chain when changed.
 
-## Status
+## Status (implemented, `[cloud_dns] enabled = true`)
 
-Implemented (first slice, `[cloud_dns] enabled = true`, off by default):
+| Constraint | Implementation |
+|---|---|
+| 1. Never an open resolver | every query must be attributed: DoH token (404), DoT/DoQ SNI label or registered network, plain DNS registered network (`REFUSED`, header-only, no amplification); registrable CIDRs are limited (public IPv4 ≥ /24, IPv6 ≥ /48) |
+| 2. Tenant identification | `hyg_dns_` tokens (DoH path, optional DoT/DoQ label), registered networks with longest-prefix match, "link my IP" for dynamic addresses |
+| 3. Rate limiting | per token and per source address (IPv6 per /64), failed-auth budget per address, query size cap, connection cap, QUIC Retry, UDP truncation |
+| 4. Privacy | query log **off by default**; client pseudonym = HMAC with a daily-rotating, per-tenant key; no raw IP or token logged; per-tenant retention (1–365 d) with an hourly purge; erase endpoint |
+| 5. Upstream | ordered failover over UDP, DoT (verified TLS, connection reuse) and DoH; reply-id validation; 30 s back-off after two failures. Not implemented: active health probes, DNSSEC validation (replies pass through) |
+| 6. Operations | stateless replicas (settings, networks, tokens in PostgreSQL; ≤ 30 s propagation), `/readyz`, Prometheus `/metrics`, graceful drain, certificate hot-reload |
+| 7. Failure policy | per-tenant `fail_open` and `block_mode` settings (audited), server defaults |
 
-- **DoH** `GET|POST /dns-query/<token>` (RFC 8484, wire format), token `hyg_dns_…` per tenant + group, SHA-256 stored, revocable, optional expiry, issued via `POST /v1/admin/dns-tokens` (permission `ApiTokensManage`; secret shown once, never in audit or list). Unknown/revoked/expired token = 404 and nothing is resolved (never an open resolver).
-- Per-token token-bucket rate limit (429), 4 KiB query cap, positive (30 s) and negative (10 s) token-lookup cache so garbage tokens do not hit the database; local revocation is immediate, other replicas lag at most 30 s.
-- Decision with the tenant's signed bundle (same engine as everywhere), NXDOMAIN or null-IP; allowed queries go to a plain-UDP upstream; failure policy global `fail_open` (default closed = SERVFAIL).
-- Counters (queries, blocked, forwarded, auth failures, rate limited, servfail) in memory.
+Transports: DoH, DoT, DoQ, plain UDP/TCP, and native HTTPS for the API (or a TLS-terminating proxy). Guide: [Cloud DNS](../guides/cloud-dns.md).
 
-Not implemented: DoT (SNI), registered-CIDR plain DNS, DoQ; DoT/DoH upstream and health-checked failover; **query log with IP pseudonymisation and retention**; Prometheus metrics endpoint; per-tenant failure policy; per-source-IP limits (needs connection info in the API server). TLS is terminated by a reverse proxy in front: it must redact the request path in its logs.
+Not implemented: HTTP/3 for DoH, EDNS client subnet, per-user policy, anycast. Connection limits per source address (global caps only). Metrics are per process (aggregate across replicas in Prometheus).
 
 ## Relation to the node
 

@@ -37,7 +37,7 @@ Hygieia compiles open-license filter lists and your own rules into **one version
 - **One policy, many enforcement points.** Precedence is fixed: custom allow > custom block > list allow > list block > default.
 - **Signed and verifiable.** Clients verify the signature before decoding and refuse rollbacks; the extension pins the key.
 - **Runs the way you need it.** A *standalone node* on one PC (no database, no IdP), a *central server* for an organisation (PostgreSQL, OIDC, replicas), or both: nodes in front of a server, caching bundles and surviving outages.
-- **DNS is opt-in.** The default install never touches the system resolver. Local DNS filtering and a cloud DNS-over-HTTPS service (per-token, never an open resolver) are options.
+- **DNS is opt-in.** The default install never touches the system resolver. Local DNS filtering and a cloud DNS service (DoH, DoT, DoQ, plain DNS from registered networks; never an open resolver) are options.
 - **Multi-tenant by construction.** Single-organisation is the same code path with one tenant. PostgreSQL row-level security enforces isolation; tenant and group derive from the credential, never from request parameters.
 - **Auditable.** Per-tenant SHA-256 hash chain, verification endpoint, append-only at the database, secrets never in diffs.
 - **Open lists, downloaded at runtime** (HaGeZi, StevenBlack, URLhaus, EasyList/EasyPrivacy, uBlock filters), each with license and attribution; lists are treated as hostile input.
@@ -83,7 +83,7 @@ Then connect a browser (`./extension/build.sh`, load `extension/`, enter the URL
 
 ```bash
 scripts/smoke-node.sh      # 19 behaviour checks against the real node binary
-scripts/smoke-server.sh    # 32 checks: RBAC, tenants, DoH gating, audit, connected node, offline behaviour
+scripts/smoke-server.sh    # 46 checks: RBAC, tenants, cloud DNS, query log, metrics, HTTPS, audit, connected node, offline behaviour
 ```
 
 Step by step: [Getting started](docs/guides/getting-started.md).
@@ -114,9 +114,9 @@ Releases are cut by tagging `vX.Y.Z` (workflow `release`, draft release with `SH
 | Standalone node: file state, host/origin guard, opt-in local DNS, CLI | done on Linux |
 | Connected node: relay, pinned key, rollback guard, disk cache, offline serving | done; no local DNS or telemetry in connected mode |
 | Central redundancy: shared compiled bundles, coordinated list refresh, `/readyz`, graceful drain | done; tested with in-process replicas |
-| Cloud DNS (DoH, per-token, rate limited) | first slice; **no DoT, query log or metrics yet** |
+| Cloud DNS: DoH, DoT, DoQ, plain UDP/TCP for registered networks; upstream failover over UDP/DoT/DoH; per-token, per-source and failed-auth limits; per-tenant policy; opt-in pseudonymised query log with retention; Prometheus metrics; native HTTPS with certificate hot-reload | implemented, tested in-process and by smoke scenarios; **not load-tested, no DNSSEC validation, no HTTP/3** |
 | Packaging: `.deb`, systemd, Windows service/tray | see *Install* |
-| OpenAPI + generated client, DNS query log, DoT, MSI, wizard | planned: [Roadmap](docs/ROADMAP.md) |
+| OpenAPI + generated client, MSI, wizard, node-side cloud forwarding | planned: [Roadmap](docs/ROADMAP.md) |
 
 ## Documentation
 
@@ -130,7 +130,7 @@ Releases are cut by tagging `vX.Y.Z` (workflow `release`, draft release with `SH
 
 ## Security in one paragraph
 
-Credentials are 256-bit random, stored as SHA-256 only, shown once. OIDC identity is `(iss, sub)`; roles never escalate; break-glass is refused in production and audited on every use. Bundles are signed and verified before decoding. The node binds loopback, checks `Host` and `Origin`, and never puts credentials in process arguments. The admin UI has a strict CSP. PostgreSQL enforces tenant isolation and an append-only audit table. **Not yet covered:** TLS in the binaries (terminate in front), rate limiting of admin endpoints, DNS query log, signed releases. Read [Security](docs/security.md) before deploying; report vulnerabilities privately (GitHub *Security → Report a vulnerability*).
+Credentials are 256-bit random, stored as SHA-256 only, shown once. OIDC identity is `(iss, sub)`; roles never escalate; break-glass is refused in production and audited on every use. Bundles are signed and verified before decoding. The node binds loopback, checks `Host` and `Origin`, and never puts credentials in process arguments. The admin UI has a strict CSP. PostgreSQL enforces tenant isolation and an append-only audit table. **Not yet covered:** rate limiting of admin endpoints, log shipping (syslog/OTLP), DNSSEC validation, signed releases. Read [Security](docs/security.md) before deploying; report vulnerabilities privately (GitHub *Security → Report a vulnerability*).
 
 ## Testing
 

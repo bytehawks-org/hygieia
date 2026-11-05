@@ -12,7 +12,7 @@
 
 Logs are structured `tracing` output on stderr; filter with `RUST_LOG` (e.g. `RUST_LOG=info,hygeia_api=debug`). Secrets and DoH tokens are never logged by the application. Things worth alerting on: `list refresh` errors, `refusing rollback`, `bundle failed verification`, `readiness check failed`, `break-glass` warnings, audit append failures.
 
-There is no Prometheus endpoint yet; cloud DNS counters are in memory only.
+Metrics: set `HYGEIA_METRICS_TOKEN` and scrape `GET /metrics` with that bearer token (queries by tenant/transport/outcome, latency histogram, auth failures, refused, rate limited, SERVFAIL, list freshness; see the [Cloud DNS guide](guides/cloud-dns.md#metrics) for alerts). Counters are per process: aggregate across replicas in Prometheus. Set `api.access_log = true` for a request log with DoH/link credentials redacted.
 
 ## Backup and restore
 
@@ -41,6 +41,8 @@ Plan for an overlapping-key mechanism if you need zero-touch rotation (not imple
 
 | Task | How |
 |---|---|
+| Renew the TLS certificate | replace the files named in `[tls]`; the server reloads them within a minute (watch for `TLS certificate reloaded` or the error that keeps the old one) |
+| Apply query-log retention now | automatic hourly; `DELETE /v1/admin/dns/query-log` erases a tenant's log |
 | Revoke a device | UI → Devices, or `DELETE /v1/admin/devices/{id}`; effective on its next bundle pull (immediately through a connected node when the server is reachable) |
 | Revoke an API or DNS token | `DELETE /v1/admin/api-tokens/{id}` / `dns-tokens/{id}` |
 | Force a list refresh | UI → Filter lists, or `POST /v1/admin/lists/refresh` (the lease holder downloads) |
@@ -60,5 +62,7 @@ Plan for an overlapping-key mechanism if you need zero-touch rotation (not imple
 | Connected node returns 502 | server unreachable and the device never got a bundle through this node; check `upstream.url`, the pinned key and `GET /v1/node/status` |
 | Node returns 421 | the `Host` header is not allowed: use the node's own URL or add the name to `http.allowed_hosts` |
 | DoH 404 | token invalid, expired, revoked or `[cloud_dns]` disabled |
-| DoH 429 | per-token rate limit (`rate_per_sec`, `burst`) |
+| DoH 429 / DNS silently dropped | per-token or per-source rate limit (`rate_per_sec`, `burst`, `ip_rate_per_sec`, `ip_burst`) or a spent failed-authentication budget for that address (wait, or fix the client's token) |
+| Plain DNS / DoT answers `REFUSED` | the client's source address is not a registered network (and, for DoT/DoQ, the SNI label does not match a token); behind NAT or a proxy check the address the server sees |
+| Query log empty | `log_enabled` is false for the tenant (default), or the writer queue overflowed (`hygeia_dns_query_log_dropped_total`) |
 | DNS port 53 in use on Linux | systemd-resolved stub; see the [Node guide](guides/node.md#linux-deb-systemd) |

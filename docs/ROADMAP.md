@@ -10,14 +10,14 @@ Order matters: items 1–4 were requested ahead of the previously suggested step
 | 2 | **Connected mode** (relay, pinned key, disk cache, offline: done; local DNS, audit/telemetry forwarding: todo) | Node relays browser enrolments, fetches/verifies/caches central bundles on disk, keeps enforcing during outages | 1, central node endpoints (`/v1/node/*`) |
 | 3 | **Central redundancy** (shared compiled bundles, `/readyz`, SIGTERM drain: done; coordinated list refresh: done) | Several server instances behind a load balancer: bundles compiled once and persisted in PostgreSQL (stable ETag/version), coordinated list refresh, health/readiness, graceful shutdown | PostgreSQL store |
 | 4 | **Packaging, service and graphical mode** (Linux .deb + systemd: done; Windows service + zip/ps1: written, unverified; tray: written, unverified; MSI, wizard, pause-blocking API: todo) | systemd unit + `.deb`/`.rpm`, Windows service + MSI, tray icon, local UI first-run wizard; OS-resolver integration only as an explicit opt-in step, with safe revert; `windows-latest` CI job | 1 (2 for connected wizard) |
-| 5 | **Cloud DNS service** (SaaS, multi-tenant; DoH + tokens + rate limit done; DoT, CIDRs, query log, metrics, DoT/DoH upstream: todo) | Filtering DNS facing the Internet: DoH token path, DoT SNI, registered CIDRs; never an open resolver; rate limiting; DoT/DoH upstream; query log with IP pseudonymisation and retention; metrics. Also the target of the node's *cloud forward* option. Constraints: `docs/architecture/dns-service.md` | 3 (replicas) |
+| 5 | **Cloud DNS service** (SaaS, multi-tenant: done in full — DoH, DoT, DoQ, plain DNS by registered network, upstream failover, per-tenant policy, rate limits, query log, metrics, native TLS; remaining: DNSSEC, HTTP/3, per-source connection limits, node-side *cloud forward*) | Filtering DNS facing the Internet: DoH token path, DoT SNI, registered CIDRs; never an open resolver; rate limiting; DoT/DoH upstream; query log with IP pseudonymisation and retention; metrics. Also the target of the node's *cloud forward* option. Constraints: `docs/architecture/dns-service.md` | 3 (replicas) |
 | 6 | **OpenAPI + generated client** | utoipa schema, generated TypeScript client replaces the hand-written types | — |
 
 ## Done
 
 Documentation (`docs/`), README with status badges, behaviour smoke scenarios (`scripts/`), CodeQL / audit / coverage / release workflows, scale report test.
 
-Cloud DNS, first slice (item 5): `hyg_dns_` tokens (store, RLS, API), DoH endpoint with per-token rate limit and tenant bundles.
+Cloud DNS (item 5): tokens, DoH/DoT/DoQ/plain DNS front-ends, registered networks, upstream pool with failover, per-tenant settings, pseudonymised query log with retention, Prometheus metrics, per-source rate limits, native HTTPS with reloadable certificates.
 
 Central redundancy, core (item 3): `compiled_bundles` table, content-addressed bundles shared across replicas, readiness probe, graceful SIGTERM, lease-based coordinated list refresh with lists shared through the store.
 

@@ -14,7 +14,7 @@ Base URL: the server (`http://127.0.0.1:8080`) or a standalone node (`http://127
 | Device credential | `hyg_dev_…` | device in a tenant + policy group | pulls bundles only; never opens the admin API |
 | DNS token | `hyg_dns_…` | tenant + group for cloud DNS | path credential, see [Cloud DNS](../guides/cloud-dns.md) |
 
-Send admin credentials as `Authorization: Bearer <credential>`. Only SHA-256 hashes of secrets are stored. A single generic 401 is returned for invalid enrolment tokens (no reason leaked).
+Send admin credentials as `Authorization: Bearer <credential>`. Only SHA-256 hashes of secrets are stored. A single generic 401 is returned for invalid enrolment tokens (no reason leaked). Behind a reverse proxy set `api.trusted_proxies`, otherwise the proxy's address is taken as the client.
 
 ## Roles and permissions
 
@@ -44,6 +44,8 @@ Send admin credentials as `Authorization: Bearer <credential>`. Only SHA-256 has
 | `GET /v1/bundle` | device credential | signed bundle (`application/vnd.hygeia.bundle`); `ETag`, `If-None-Match` → 304 |
 | `GET /v1/config` | none | non-secret deployment info for the UI: `mode`, `environment`, `break_glass`, `oidc` |
 | `GET\|POST /dns-query/{token}` | DNS token in path | RFC 8484 DoH, only when `[cloud_dns]` is enabled (else 404) |
+| `PUT /v1/dns/link/{token}` | DNS token in path | register the caller's address as that token's client network (replaces its previous one) |
+| `GET /metrics` | scrape token (`HYGEIA_METRICS_TOKEN`) | Prometheus text; 404 while unset |
 
 Node-only: `GET /v1/node/status` (connected mode, bearer = local credential).
 
@@ -59,7 +61,12 @@ All require a credential with the stated permission. Every mutating call is writ
 | `GET /v1/admin/users` | `TenantsManage` | platform users |
 | `GET\|POST /v1/admin/bindings`, `DELETE …/{id}` | `UsersManage` | role bindings |
 | `GET\|POST /v1/admin/api-tokens`, `DELETE …/{id}` | `ApiTokensManage` | `{name,role,ttl_secs?}` → secret once |
-| `GET\|POST /v1/admin/dns-tokens`, `DELETE …/{id}` | `ApiTokensManage` | `{name,group_id?,ttl_secs?}` → secret and `doh_path` once |
+| `GET\|POST /v1/admin/dns-tokens`, `DELETE …/{id}` | `ApiTokensManage` | `{name,group_id?,ttl_secs?,dot?}` → secret, `doh_path` and (with `dot`) `dot_label` once |
+| `GET\|POST /v1/admin/dns/networks`, `DELETE …/{id}` | `ApiTokensManage` | registered client networks `{name,cidr,group_id?}` (broad ranges → 400, duplicate across tenants → 409) |
+| `GET\|PUT /v1/admin/dns/settings` | `RulesRead` / `GroupsManage` | `{log_enabled, retention_days (1–365), fail_open?, block_mode?}` |
+| `GET /v1/admin/dns/query-log` | `AuditRead` | `?since=&limit=(≤1000)&q=&action=allow\|block`; newest first |
+| `DELETE /v1/admin/dns/query-log` | `GroupsManage` | erase the tenant's log (audited) |
+| `GET /v1/admin/dns/stats` | `AuditRead` | totals, top blocked names, top client pseudonyms, by transport (newest 50 000 entries) |
 | `POST /v1/admin/enrollment-tokens` | `TokensManage` | `{group_id?,ttl_secs?(3600),max_uses?}` |
 | `GET /v1/admin/devices`, `DELETE …/{id}` | `DevicesRead` / `DevicesManage` | devices; revoke |
 | `GET\|POST /v1/admin/rules`, `DELETE …/{id}` | `RulesRead` / `RulesWrite` | `{action: allow\|block, pattern, group_id?, comment?}` |
@@ -76,7 +83,7 @@ All require a credential with the stated permission. Every mutating call is writ
 
 ## Errors
 
-`401` unauthenticated or invalid credential · `403` authenticated but not permitted (or cross-origin on a node) · `404` unknown object (also DoH with an invalid token) · `409` conflict / broken audit chain · `421` unexpected `Host` (node) · `429` rate limited (DoH) · `502` upstream unreachable and nothing cached (connected node) · `503` store unavailable (`/readyz`).
+`401` unauthenticated or invalid credential · `403` authenticated but not permitted (or cross-origin on a node) · `404` unknown object (also DoH with an invalid token) · `409` conflict / broken audit chain · `421` unexpected `Host` (node) · `429` rate limited (DoH, link) · `502` upstream unreachable and nothing cached (connected node) · `503` store unavailable (`/readyz`).
 
 ## Not available yet
 
