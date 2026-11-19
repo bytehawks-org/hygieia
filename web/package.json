@@ -9,13 +9,13 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "next": "^16.4.5",
+    "next": "^16.4.6",
     "openapi-fetch": "^0.17.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.3.4",
+    "@tailwindcss/postcss": "^4.3.5",
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
